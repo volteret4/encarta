@@ -1,0 +1,5 @@
+encarta.db
+encarta.db.tmp
+cache.db
+__pycache__/
+site/
