@@ -1,5 +1,11 @@
-encarta.db
-encarta.db.tmp
-cache.db
-__pycache__/
-site/
+.env*
+**/.env*
+*.db*
+**/.db*
+*.json*
+**/.json*
+*.csv*
+**/.csv*
+**/__pycache__/
+client_secret.json
+client_secret*·json

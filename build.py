@@ -238,6 +238,9 @@ def parse_source(sf):
     """source_file de ensayos → (fuente, episodio, url), con el podcast resuelto por el id del vídeo."""
     src, ep, url = _parse_source(sf)
     m = re.search(r'(?:v=|youtu\.be/)([\w-]{11})', url or '')
+    if m:
+        # Un mismo vídeo llega con y sin «&list=…»: una sola URL por episodio.
+        url = f'https://www.youtube.com/watch?v={m.group(1)}'
     known = EPISODES.get(m.group(1)) if m else None
     if known and (src in (None, 'Podcast') or src not in PODCASTS.values() and src not in PODCAST_ALIASES and
                   not re.match(r'^(Wikidata|AOTY|Scaruffi|musicbrainz|sputnikmusic|Rolling Stone|Wikipedia)', src or '')):

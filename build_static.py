@@ -77,8 +77,16 @@ def main():
         dump(os.path.join(data, 'y', f'{y}.json'), serve.year_detail(con, y))
     print(f'años: {YEARS.start}-{YEARS.stop - 1}')
 
+    # Las cifras de portada, de lo que lleva esta versión (no de la base completa).
     stats = serve.stats(con)
-    stats.update({'threshold': a.min, 'lists_exported': lists, 'exported': len(rows)})
+    counts = {t: 0 for t in ('artist', 'album', 'song', 'work', 'label', 'genre')}
+    for r in rows:
+        counts[r[1]] += 1
+    con.execute('CREATE TEMP TABLE exported (id INTEGER PRIMARY KEY)')
+    con.executemany('INSERT INTO exported VALUES (?)', [(r[0],) for r in rows])
+    facts = con.execute("SELECT COUNT(*) FROM fact WHERE kind IN ('podcast', 'curiosity') "
+                        "AND entity_id IN (SELECT id FROM exported)").fetchone()[0]
+    stats.update(counts, facts=facts, lists=len(lists), threshold=a.min, lists_exported=lists)
     dump(os.path.join(data, 'stats.json'), stats)
     con.close()
 

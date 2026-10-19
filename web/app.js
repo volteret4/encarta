@@ -167,12 +167,17 @@ class Refs {
   constructor() { this.list = []; this.map = new Map(); }
   cite(f) {
     if (!f.source && !f.url) return '';
-    const key = `${f.source}|${f.episode}|${f.url}`;
+    // Una referencia por episodio: por vídeo de YouTube o, si no lo hay, por podcast + episodio
+    // (el mismo episodio llega a veces con enlace y a veces sin él: se queda el que lo tiene).
+    const id = ytId(f.url);
+    const key = id ? `yt:${id}` : f.episode ? `${f.source}|${f.episode}` : `${f.source}|${f.url}`;
     let n = this.map.get(key);
     if (!n) {
-      this.list.push(f);
+      this.list.push({ ...f });
       n = this.list.length;
       this.map.set(key, n);
+    } else if (f.url && !this.list[n - 1].url) {
+      this.list[n - 1].url = f.url;
     }
     return `<sup class="ref"><a href="#" data-jump="cite-${n}">[${n}]</a></sup>`;
   }
@@ -270,7 +275,11 @@ function factList(facts, A, id, opts = {}) {
     const title = f.title || f.episode || 'Nota';
     const who = opts.entity && f.id ? `<span class="muted"> · ${badge(f.type)} ${link(f)}</span>` : '';
     const from = f.extra && f.extra.from ? `<div class="src">En la ficha de ${link({ id: f.extra.from_id, name: f.extra.from })}</div>` : '';
-    const srcs = f.srcs || [f];
+    const seenRef = new Set();
+    const srcs = (f.srcs || [f]).filter((x) => {
+      const k = ytId(x.url) || (x.episode ? `${x.source}|${x.episode}` : `${x.source}|${x.url}`);
+      return !seenRef.has(k) && seenRef.add(k);
+    });
     const src = srcs.map((x) => [x.source, x.episode && x.episode !== title ? x.episode : null].filter(Boolean).map(esc).join(' · '))
       .filter(Boolean).join(' / ');
     return `<div data-f><dt>${text(title)}${f.year && !String(title).includes(f.year) ? `<span class="yr">(${f.year})</span>` : ''}${who}</dt>
@@ -357,18 +366,29 @@ function sourcesCell(f) {
   const out = [
     ...f.books.map((b) => `<span class="src-tag book" title="Libro: ${esc(b.title)}">${esc(b.name)}</span>`),
     ...f.podcasts.map((p) => `<span class="src-tag pod" title="Podcast: ${esc(p.name)} (${plural(p.n, 'nota', 'notas')})">${esc(SHORT_PODCAST[p.name] || p.name)}${p.n > 1 ? ` <small>×${p.n}</small>` : ''}</span>`),
-    ...f.lists.map((l) => listLink(l.id, `${esc(l.name)}${l.rank ? ` <small>#${l.rank}</small>` : ''}`, 'src-tag list', `Lista: ${esc(l.name)}${l.rank ? ` (puesto ${l.rank})` : ''}`)),
+    ...f.lists.map((l) => listLink(l.id, `${esc(l.name)}${rankTag(l)}`, 'src-tag list',
+      `Lista: ${esc(l.name)}${isScaruffi(l.name) ? (l.scaruffi != null ? ` (nota ${score(l.scaruffi)}/10)` : '') : l.rank ? ` (puesto ${l.rank})` : ''}`)),
   ];
   if (f.n_lists > f.lists.length) out.push(`<span class="muted small">+${plural(f.n_lists - f.lists.length, 'lista', 'listas')}</span>`);
   return out.join(' ');
 }
 const legend = () => `<div class="legend small muted">Fuentes: <span class="src-tag book">libro</span> <span class="src-tag pod">podcast</span> <span class="src-tag list">lista</span></div>`;
 
+// Las listas de Scaruffi van ordenadas por su nota (0-10); el puesto no es un ranking: se muestra la nota.
+const isScaruffi = (list) => /^Scaruffi\b/i.test(list || '');
+const score = (n) => Number(n).toLocaleString('es', { maximumFractionDigits: 1 });
+function rankCells(list, x) {
+  if (isScaruffi(list)) {
+    return `<td class="num"></td><td class="small">${x.scaruffi != null ? `${score(x.scaruffi)}/10 (nota Scaruffi)` : ''}</td>`;
+  }
+  return `<td class="num">${x.rank ?? ''}</td><td class="small">${esc(x.note || '')}</td>`;
+}
+const rankTag = (l) => (isScaruffi(l.name) ? (l.scaruffi != null ? ` <small>${score(l.scaruffi)}</small>` : '') : l.rank ? ` <small>#${l.rank}</small>` : '');
+
 function listsTable(lists) {
   if (!lists.length) return '';
-  return `<table class="wikitable"><tr><th>Lista</th><th class="num">Puesto</th><th class="num">Año</th><th>Nota</th></tr>
-    ${lists.map((l) => `<tr><td>${listLink(l.id, esc(l.name))}</td><td class="num">${l.rank ?? ''}</td>
-      <td class="num">${yearLink(l.year || l.list_year)}</td><td class="small">${esc(l.note || '')}</td></tr>`).join('')}</table>`;
+  return `<table class="wikitable"><tr><th>Lista</th><th class="num">Año</th><th class="num">Puesto</th><th>Nota</th></tr>
+    ${lists.map((l) => `<tr><td>${listLink(l.id, esc(l.name))}</td><td class="num">${yearLink(l.year || l.list_year)}</td>${rankCells(l.name, l)}</tr>`).join('')}</table>`;
 }
 
 function entityTable(items, cols_ = ['year', 'name', 'artist']) {
@@ -398,13 +418,11 @@ function coverage({ books = 0, podcast = 0, lists = 0, works = 0 }) {
   return bits.length ? `Hay ${bits.join(', ').replace(/, ([^,]*)$/, ' y $1')}.` : 'No hay mucha información todavía.';
 }
 
-// Texto largo: el primer tramo a la vista y el resto plegado.
-function longText(s, max = 700) {
+// Biografía o descripción completas, por párrafos, sin la coletilla de licencia de Last.fm.
+function fullText(s) {
   if (!s) return '';
   s = s.replace(/\s*User-contributed text is available under the Creative Commons.*$/s, '');
-  if (s.length <= max * 1.3) return `<p>${text(s)}</p>`;
-  const cut = s.lastIndexOf('. ', max) > max / 2 ? s.lastIndexOf('. ', max) + 1 : max;
-  return `<p>${text(s.slice(0, cut))}</p><details class="more"><summary>Seguir leyendo</summary><p>${text(s.slice(cut).trim())}</p></details>`;
+  return s.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean).map((p) => `<p>${text(p)}</p>`).join('');
 }
 
 // En la fuente, «aliases» trae a veces artistas similares: se descartan los que coinciden.
@@ -446,7 +464,7 @@ function renderArtist(e) {
   const nBooks = uniqBooks(e.own_scenes, e.scenes, e.book_tracks);
   A.add(`<p class="lead"><b>${esc(e.name)}</b>${isGroup ? ' es un grupo' : ''}${i.origin || i.country ? ` (${esc(i.origin || i.country)})` : ''}${e.year ? `, en activo desde ${yearLink(e.year)}` : ''}.
     ${coverage({ books: nBooks, podcast: e.podcast.length, works: e.works.length, lists: e.charts.length })}</p>`);
-  A.add(longText(stripHtml(i.bio)));
+  A.add(fullText(stripHtml(i.bio)));
   if (i.wikipedia) A.add(`<details class="more"><summary>Texto de Wikipedia</summary><p class="longtext">${text(i.wikipedia)}</p></details>`);
 
   const books = [
@@ -457,15 +475,20 @@ function renderArtist(e) {
   ].join('');
   A.section('En los libros', books, nBooks);
   A.section('En los podcasts', factList(e.podcast, A, 'f-podcast'), e.podcast.length);
-  A.section('Discografía', worksTable(e.works, 'f-works', e.name), e.works.length);
+  A.section('Discografía mencionada', worksTable(e.works, 'f-works', e.name), e.works.length);
+  const chartTable = (rows) => `<table class="wikitable"><tr><th class="num">Año</th><th>Título</th><th>Lista</th><th class="num">Puesto</th><th>Nota</th></tr>
+    ${rows.map((c) => `<tr><td class="num">${yearLink(c.year)}</td><td>${c.type ? playWork(c, e.name) : ''}${link(c)}</td>
+      <td>${c.list_id ? listLink(c.list_id, esc(c.list)) : `${esc(c.list)}${c.url ? ' ' + ext(c.url, '') : ''}`}</td>${rankCells(c.list, c)}</tr>`).join('')}</table>`;
+  const rymTop = e.charts.filter((c) => /^RYM Top/.test(c.list));
+  const mainCharts = e.charts.filter((c) => !/^RYM Top/.test(c.list));
   const charts = [
-    e.charts.length ? `<table class="wikitable"><tr><th class="num">Año</th><th>Título</th><th>Lista</th><th class="num">Puesto</th><th>Nota</th></tr>
-      ${e.charts.map((c) => `<tr><td class="num">${yearLink(c.year)}</td><td>${playWork(c, e.name)}${link(c)}</td><td>${listLink(c.list_id, esc(c.list))}</td>
-      <td class="num">${c.rank ?? ''}</td><td class="small">${esc(c.note || '')}</td></tr>`).join('')}</table>` : '',
-    e.chart_facts.length ? `<h3>Listas y charts (podcasts)</h3>${factList(e.chart_facts, A, 'f-chartfacts')}` : '',
-    e.awards.length ? `<h3>Premios</h3>${factList(e.awards, A, 'f-awards')}` : '',
+    mainCharts.length ? chartTable(mainCharts) : '',
+    rymTop.length ? `<details class="more"><summary>Charts de género de RYM (${rymTop.length})</summary>${chartTable(rymTop)}</details>` : '',
+    e.awards.length ? `<h3>Premios</h3><table class="wikitable"><tr><th class="num">Año</th><th>Premio</th><th>Detalle</th></tr>
+      ${e.awards.map((f) => `<tr><td class="num">${yearLink(f.year)}</td><td>${text(String(f.title || '').replace(/\s*\(\d{4}\)\s*$/, ''))}</td>
+        <td class="small">${text(f.body || '')}${(f.srcs || []).filter((x) => x.url).slice(0, 1).map((x) => ' ' + ext(x.url, x.source || hostOf(x.url))).join('')}</td></tr>`).join('')}</table>` : '',
   ].join('');
-  A.section('Charts, listas y premios', charts);
+  A.section('Charts, listas y premios', charts, mainCharts.length + rymTop.length + e.awards.length);
   const told = e.concerts.filter((c) => c.body);
   const named = e.concerts.filter((c) => !c.body && !told.some((t) => t.title === c.title));
   A.section('Conciertos', factList(told, A, 'f-concerts') + (named.length ? `${told.length ? '<h3>Otros conciertos</h3>' : ''}${inline(named, (c) => esc(c.title))}` : ''),
@@ -516,7 +539,7 @@ function renderWork(e) {
   A.add(`<p class="lead"><b>${esc(e.name)}</b> es ${what}${e.artist ? ` de ${e.artist_ref ? link(e.artist_ref) : esc(e.artist)}` : ''}${e.year ? ` publicado en ${yearLink(e.year)}` : ''}.
     ${coverage({ books: nBooks, podcast: e.podcast.length, lists: e.lists.length })}
     ${e.book_tracks.some((t) => t.ess) ? '<span class="star">★</span> Destacado como esencial en un libro.' : ''}</p>`);
-  A.add(longText(stripHtml(i.desc)));
+  A.add(fullText(stripHtml(i.desc)));
   if (i.scaruffi_note) A.add(`<p class="small muted">Scaruffi: ${esc(i.scaruffi_note)}</p>`);
   if (i.wikipedia) A.add(`<details class="more"><summary>Texto de Wikipedia</summary><p class="longtext">${text(i.wikipedia)}</p></details>`);
   A.section('En los libros', bookTracks(e.book_tracks), nBooks);
@@ -602,7 +625,9 @@ async function showYear(y) {
   A.section('Discos del año', entityTable(d.albums, ['name', 'artist', 'type']), d.albums.length);
   A.section('Canciones', entityTable(d.songs, ['name', 'artist']), d.songs.length);
   A.section('Charts', d.charts.map((c) => `<h3>${listLink(c.id, esc(c.name))}</h3>
-    <ol class="plain">${c.items.map((x) => `<li value="${x.rank ?? ''}">${playWork(x)}${link(x)}${artistOf(x)}${x.note ? ` <span class="muted small">${esc(x.note)}</span>` : ''}</li>`).join('')}</ol>`).join(''), d.charts.length);
+    ${isScaruffi(c.name)
+    ? `<ul class="plain">${c.items.map((x) => `<li>${playWork(x)}${link(x)}${artistOf(x)}${x.scaruffi != null ? ` <span class="muted small">${score(x.scaruffi)}/10 (nota Scaruffi)</span>` : ''}</li>`).join('')}</ul>`
+    : `<ol class="plain">${c.items.map((x) => `<li value="${x.rank ?? ''}">${playWork(x)}${link(x)}${artistOf(x)}${x.note ? ` <span class="muted small">${esc(x.note)}</span>` : ''}</li>`).join('')}</ol>`}`).join(''), d.charts.length);
   A.section('Artistas que empiezan', cols(d.artists), d.artists.length);
   A.section('Notas de podcast', factList(d.facts, A, 'f-year', { entity: true }), d.facts.length);
   A.render();
@@ -616,8 +641,9 @@ async function showList(id) {
     ${l.url ? ' · ' + ext(l.url, hostOf(l.url)) : ''}</div>`);
   A.add(`<p class="lead">${plural(l.items.length, 'entrada', 'entradas')}${l.year ? ` · ${yearLink(l.year)}` : ''}.</p>`);
   A.section('Entradas', filterBox('f-list') + `<table class="wikitable" id="f-list"><tr><th class="num">#</th><th>Título</th><th>Artista</th><th class="num">Año</th><th>Nota</th></tr>
-    ${l.items.map((x) => `<tr data-f><td class="num">${x.rank ?? ''}</td><td>${playWork(x)}${link(x)}</td><td>${esc(x.artist || '')}</td>
-      <td class="num">${yearLink(x.item_year || x.year)}</td><td class="small">${esc(x.note || '')}</td></tr>`).join('')}</table>`);
+    ${l.items.map((x) => `<tr data-f><td class="num">${isScaruffi(l.name) ? '' : x.rank ?? ''}</td><td>${playWork(x)}${link(x)}</td><td>${esc(x.artist || '')}</td>
+      <td class="num">${yearLink(x.item_year || x.year)}</td><td class="small">${isScaruffi(l.name)
+        ? (x.scaruffi != null ? `${score(x.scaruffi)}/10 (nota Scaruffi)` : '') : esc(x.note || '')}</td></tr>`).join('')}</table>`);
   A.render();
 }
 
@@ -652,7 +678,7 @@ async function showHome() {
     <p class="welcome">${n('artist')} artistas, ${n('album')} álbumes, ${n('song')} canciones,
       ${n('label')} sellos y ${n('genre')} géneros, con ${n('facts')} notas de podcast, ${s.books.length} libros y ${n('lists')} listas.
       <br><span class="muted small">Datos de ${esc(s.built)} · <a href="#/azar">Abrir una entrada al azar</a></span>
-      ${s.threshold ? `<br><span class="muted small">Versión reducida: ${n('exported')} fichas con más información; el resto aparece sin enlace.</span>` : ''}</p>
+</p>
     <div class="portal">
       <section><h2>Artistas destacados</h2>${inline(s.top.artist)}</section>
       <section><h2>Discos destacados</h2>${inline(s.top.album, (x) => `${link(x)}${artistOf(x)}`)}</section>

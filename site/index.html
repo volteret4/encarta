@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Encarta</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='15' fill='%23202122' stroke='%2388a3e8' stroke-width='2'/><text x='16' y='22' font-family='Georgia' font-size='18' text-anchor='middle' fill='%23eaecf0'>E</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#/">
+    <span class="logo">E</span>
+    <span class="wordmark"><b>Encarta</b></span>
+  </a>
+  <form class="search" id="search" autocomplete="off" role="search">
+    <select id="type" aria-label="Tipo">
+      <option value="all">Todo</option>
+      <option value="artist">Artista</option>
+      <option value="album">Álbum</option>
+      <option value="song">Canción</option>
+      <option value="label">Sello</option>
+      <option value="genre">Género</option>
+      <option value="year">Año</option>
+    </select>
+    <input id="q" type="search" placeholder="Buscar artista, disco, canción, sello, género o año…" aria-label="Buscar">
+    <button type="submit">Buscar</button>
+    <ul id="suggest" class="suggest" hidden></ul>
+  </form>
+  <nav class="tools">
+    <a href="#/azar" title="Una entrada al azar">Al azar</a>
+  </nav>
+</header>
+<div class="page">
+  <aside class="toc" id="toc" aria-label="Contenido"></aside>
+  <main id="main" class="article"></main>
+</div>
+<div id="player" class="player" hidden>
+  <div class="pl-bar">
+    <span class="pl-title"></span>
+    <a class="pl-yt" target="_blank" rel="noopener" title="Abrir en YouTube">↗</a>
+    <button type="button" class="pl-min" title="Minimizar">▁</button>
+    <button type="button" class="pl-close" title="Cerrar">✕</button>
+  </div>
+  <div class="pl-video"><iframe title="Reproductor" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe></div>
+</div>
+<script>window.ENCARTA_STATIC = true;</script>
+<script src="app.js"></script>
+</body>
+</html>

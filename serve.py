@@ -36,6 +36,8 @@ RETRY = 30 * 86400  # se vuelve a buscar lo no encontrado al cabo de un mes
 
 WORK_TYPES = ('album', 'song', 'work')
 YT = "json_extract(e.info, '$.yt') AS yt"
+# Nota de Scaruffi del disco: sus listas van ordenadas por nota, el «puesto» no significa nada.
+SCARUFFI = "json_extract(e.info, '$.scaruffi') AS scaruffi"
 TYPE_FILTER = {
     'artist': ('artist',), 'album': ('album', 'work'), 'song': ('song', 'work'),
     'label': ('label',), 'genre': ('genre',),
@@ -140,11 +142,57 @@ def facts(con, eid, kinds, limit=2000):
 
 def lists_of(con, eid):
     seen = set()
-    return [r for r in rows(con.execute('''
-        SELECT l.id, l.name, l.src, l.grp, l.year AS list_year, li.rank, li.year, li.note, l.total
-        FROM list_item li JOIN list l ON l.id = li.list_id
+    return [r for r in rows(con.execute(f'''
+        SELECT l.id, l.name, l.src, l.grp, l.year AS list_year, li.rank, li.year, li.note, l.total, {SCARUFFI}
+        FROM list_item li JOIN list l ON l.id = li.list_id JOIN entity e ON e.id = li.entity_id
         WHERE li.entity_id = ? ORDER BY li.rank IS NULL, li.rank''', (eid,)))
             if not (r['name'] in seen or seen.add(r['name']))]
+
+
+CHART_TITLE = re.compile(r'^[\"“](.+?)[\"”]\s*(?:\((\d{4})\))?\s*—\s*(.+)$')
+
+
+def artist_charts(con, e, works):
+    """
+    Todas las listas y charts en que salen las obras del artista, en una tabla: las de
+    must hear, singles y charts.db, más las que solo trae ensayos (sus fichas de charts y
+    listas, «"Título" (año) — Lista» con «#puesto, …» en el texto) si no están ya.
+    """
+    ids = [w['id'] for w in works] or [0]
+    ph = ','.join('?' * len(ids))
+    out, seen = [], set()
+    for r in con.execute(f'''
+            SELECT e.id, e.type, e.name, e.year AS work_year, l.id AS list_id, l.name AS list, l.src,
+                   li.rank, li.year, li.note, {YT}, {SCARUFFI}
+            FROM list_item li JOIN list l ON l.id = li.list_id JOIN entity e ON e.id = li.entity_id
+            WHERE li.entity_id IN ({ph})''', ids):
+        k = (norm(r['name']), norm(r['list']))
+        if k in seen:
+            continue
+        seen.add(k)
+        d = dict(r)
+        d['year'] = d['year'] or d.pop('work_year')
+        out.append(d)
+    by_title = {norm(w['name']): w for w in works}
+    for f in facts(con, e['id'], ('chart', 'list')):
+        m = CHART_TITLE.match(f['title'] or '')
+        if not m:
+            continue
+        title, year, lst = m.group(1), m.group(2), m.group(3).strip()
+        if (norm(title), norm(lst)) in seen:
+            continue
+        seen.add((norm(title), norm(lst)))
+        body = f['body'] or ''
+        rank = re.search(r'#(\d+)', body)
+        weeks = re.search(r'(\d+)\s+semanas', body)
+        w = by_title.get(norm(title), {})
+        out.append({'id': w.get('id'), 'type': w.get('type'), 'name': title, 'list_id': None, 'list': lst,
+                    'src': 'ensayos', 'rank': int(rank.group(1)) if rank else None,
+                    'year': int(year) if year else f['year'], 'note': f'{weeks.group(1)} semanas' if weeks else None,
+                    'yt': None, 'scaruffi': None,
+                    'url': (f['srcs'][0]['url'] if f.get('srcs') else None)})
+    out.sort(key=lambda r: (r['year'] or 9999, r['list'], r['rank'] or 0))
+    return out
 
 
 def book(con, bid, cache={}):
@@ -283,7 +331,8 @@ def with_sources(con, items):
                                  GROUP BY entity_id, source ORDER BY COUNT(*) DESC''', part):
             src[r[0]]['podcasts'].append({'name': r[1], 'n': r[2]})
         # Primero las listas más selectivas; las «RYM Top» de género, al final.
-        for r in con.execute(f'''SELECT li.entity_id, l.id, l.name, li.rank FROM list_item li JOIN list l ON l.id = li.list_id
+        for r in con.execute(f'''SELECT li.entity_id, l.id, l.name, li.rank, {SCARUFFI}
+                                 FROM list_item li JOIN list l ON l.id = li.list_id JOIN entity e ON e.id = li.entity_id
                                  WHERE li.entity_id IN ({ph})
                                  ORDER BY l.name LIKE 'RYM Top%', l.total IS NULL, l.total''', part):
             d = src[r[0]]
@@ -292,7 +341,7 @@ def with_sources(con, items):
             d['_seen'].add(r[2])
             d['n_lists'] += 1
             if len(d['lists']) < 4:
-                d['lists'].append({'id': r[1], 'name': r[2], 'rank': r[3]})
+                d['lists'].append({'id': r[1], 'name': r[2], 'rank': r[3], 'scaruffi': r[4]})
     for w in items:
         if w['id'] in src:
             src[w['id']].pop('_seen', None)
@@ -307,11 +356,7 @@ def detail_artist(con, e):
     works.sort(key=lambda w: (w['year'] or 9999, w['name']))
     ids = [w['id'] for w in works] or [0]
     ph = ','.join('?' * len(ids))
-    charts = rows(con.execute(f'''
-        SELECT e.id, e.type, e.name, l.id AS list_id, l.name AS list, l.src, li.rank, li.year, li.note, {YT}
-        FROM list_item li JOIN list l ON l.id = li.list_id JOIN entity e ON e.id = li.entity_id
-        WHERE li.entity_id IN ({ph}) AND l.src IN ('singles', 'charts')
-        ORDER BY li.year IS NULL, li.year, li.rank''', ids))
+    charts = artist_charts(con, e, works)
     genres = related(con, eid, 'genre', 'out', ('genre',), 40)
     album_genres = brief(con, f'''SELECT e.id, e.type, e.name, COUNT(*) AS n FROM rel r JOIN entity e ON e.id = r.b
                                   WHERE r.kind = 'genre' AND r.a IN ({ph}) GROUP BY e.id ORDER BY n DESC LIMIT 15''', ids)
@@ -339,7 +384,6 @@ def detail_artist(con, e):
         'mentions': mentions(con, eid),
         'podcast': facts(con, eid, ('podcast',)),
         'awards': facts(con, eid, ('award',)),
-        'chart_facts': facts(con, eid, ('chart', 'list')),
         'concerts': facts(con, eid, ('concert',)),
         'xref': facts(con, eid, ('xref',), 300),
         'charts': charts,
@@ -449,7 +493,7 @@ def year_detail(con, y):
                        'desc': s['descr'], 'link': f"{b['url']}#{s['sid']}" if b['url'] else None})
     scenes.sort(key=lambda s: (not s['born'], (s['end'] or s['start']) - s['start']))
     charts = {}
-    for r in con.execute(f'''SELECT l.id AS list_id, l.name AS list, l.grp, e.id, e.type, e.name, e.artist, li.rank, li.note, {YT}
+    for r in con.execute(f'''SELECT l.id AS list_id, l.name AS list, l.grp, e.id, e.type, e.name, e.artist, li.rank, li.note, {YT}, {SCARUFFI}
                             FROM list_item li JOIN list l ON l.id = li.list_id JOIN entity e ON e.id = li.entity_id
                             WHERE l.src IN ('singles', 'charts') AND (li.year = ? OR (li.year IS NULL AND l.year = ?))
                             ORDER BY l.name, li.rank IS NULL, li.rank''', (y, y)):
@@ -480,7 +524,7 @@ def list_detail(con, lid):
     if not l:
         return None
     d = dict(l)
-    d['items'] = brief(con, f'''SELECT e.id, e.type, e.name, e.artist, e.year, li.rank, li.year AS item_year, li.note, {YT}
+    d['items'] = brief(con, f'''SELECT e.id, e.type, e.name, e.artist, e.year, li.rank, li.year AS item_year, li.note, {YT}, {SCARUFFI}
                                FROM list_item li JOIN entity e ON e.id = li.entity_id
                                WHERE li.list_id = ? ORDER BY li.rank IS NULL, li.rank, li.year LIMIT 2000''', (lid,))
     return d
