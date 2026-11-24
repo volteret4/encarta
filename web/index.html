@@ -6,6 +6,9 @@
 <title>Encarta</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='15' fill='%23202122' stroke='%2388a3e8' stroke-width='2'/><text x='16' y='22' font-family='Georgia' font-size='18' text-anchor='middle' fill='%23eaecf0'>E</text></svg>">
 <link rel="stylesheet" href="style.css">
+<script>try { const t = localStorage.getItem('encarta.theme'); if (t) document.documentElement.dataset.theme = t; } catch { /* sin almacenamiento */ }</script>
+<!-- Iconos Airsonic / qBittorrent / escuchado / Mix (servicio ya-lo-tengo; solo esta versión local) -->
+<script>(function(){var s=document.createElement('script');s.src=location.protocol+'//'+location.hostname+':8780/owned-badges.js';document.head.appendChild(s);})();</script>
 </head>
 <body>
 <header class="top">
@@ -29,6 +32,7 @@
   </form>
   <nav class="tools">
     <a href="#/azar" title="Una entrada al azar">Al azar</a>
+    <button type="button" class="theme" id="theme" title="Modo noche">☾</button>
   </nav>
 </header>
 <div class="page">
@@ -38,11 +42,13 @@
 <div id="player" class="player" hidden>
   <div class="pl-bar">
     <span class="pl-title"></span>
+    <button type="button" class="pl-next" title="Siguiente de la página (n) · anterior (p) · pausa (espacio)">⏭</button>
     <a class="pl-yt" target="_blank" rel="noopener" title="Abrir en YouTube">↗</a>
     <button type="button" class="pl-min" title="Minimizar">▁</button>
     <button type="button" class="pl-close" title="Cerrar">✕</button>
   </div>
-  <div class="pl-video"><iframe title="Reproductor" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe></div>
+  <div class="pl-video"><div id="pl-frame"></div></div>
+  <div class="pl-msg small" hidden></div>
 </div>
 <script src="app.js"></script>
 </body>

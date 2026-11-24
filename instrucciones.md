@@ -3,13 +3,14 @@
 Todo se hace en el portátil. Cada fuente se actualiza por su lado y, al final, se reconstruye Encarta:
 
 ```bash
-atuin scripts run <fuente>     # ensayos, libros, must_hear_*, rym_generos
+atuin scripts run <fuente>     # ensayos_podcast, ensayos, libros, must_hear_*, rym_generos
 atuin scripts run encarta      # siempre al terminar
 ```
 
 | Comando | Qué hace | Pregunta |
 |---|---|---|
-| `ensayos` | resúmenes de podcasts nuevos → `music_facts.db` | — |
+| `ensayos_podcast` | descarga, transcribe (Whisper) y resume con Claude | URL, carpeta, nombre, máx. episodios |
+| `ensayos` | resume con Claude lo transcrito y crea `music_facts.db` | — |
 | `libros` | regenera un libro de Music_Books | carpeta del libro |
 | `must_hear_nueva` | añade una serie de MusicBrainz como colección | URL de la serie, nombre |
 | `must_hear_singles` | actualiza las listas de singles | — |
@@ -17,26 +18,28 @@ atuin scripts run encarta      # siempre al terminar
 | `rym_generos` | scrapea los charts de un género padre | género padre |
 | `encarta` | reconstruye Encarta y la sube a pepecono | — |
 | `encarta_gh` | publica la versión reducida en GitHub Pages | repo |
+| `encarta_fechas` | busca el año de lo que no tiene fecha y sube Encarta | opciones (vacío o `--todo`) |
 
 Los comandos están en `encarta/atuin/*.sh`. Si se cambian: `./atuin/instalar.sh`.
 
 ## Ensayos (podcasts) — `~/gits/pollo/ensayos-musicales`
 
-1. **Podcast nuevo**: carpeta `transcripts/<podcast>/` con un `podcast.env` (`NAME=`, `RSS=`) y
-   `python3 scripts/fetch_rss.py transcripts/<podcast>/`.
-2. **Transcribir** (no lo hace `main.sh`): ajustar las rutas del principio de `scripts/1_audio_to_text.py`
-   (`INPUT_FOLDER`, `TRANSCRIPTS_FOLDER`, `RESUMENES_FOLDER`, `LANGUAGE`) y ejecutarlo con el venv
-   (`~/Scripts/python_venv/bin/python`).
-3. `atuin scripts run ensayos`. Si Gemini da error de cuota, se para: repetir al día siguiente.
-4. Revisar los artistas nuevos: `/revisar-lotes` en Claude Code dentro del proyecto.
-5. Para que el podcast salga con buen nombre en Encarta: añadirlo a `PODCASTS` en `encarta/build.py`
+1. **Podcast, canal o lista nuevos**: `atuin scripts run ensayos_podcast` con la URL (vídeo, lista o canal de
+   YouTube, o feed RSS) y una carpeta corta (`central_sonora`). Descarga solo lo que falta (`mp3_input/<carpeta>/<carpeta>.log`),
+   transcribe con Whisper y extrae los datos con Claude (`claude -p`, mismo prompt que Gemini) en `resumenes/`.
+   Se puede cortar y relanzar. Necesita Whisper en el venv: `uv pip install -p ~/.local/share/venvs/ensayos-musicales openai-whisper`.
+2. `atuin scripts run ensayos`: extrae con Claude lo que quede sin resumir en `transcripts/`, lo incorpora y crea
+   `music_facts.db`. Si se llega al límite de uso de Claude, se para: relanzar más tarde. Con Gemini, como antes:
+   `RESUMEN=gemini ./main.sh` en ensayos.
+3. Revisar los artistas nuevos: `/revisar-lotes` en Claude Code dentro del proyecto.
+4. Para que el podcast salga con buen nombre en Encarta: añadirlo a `PODCASTS` en `encarta/build.py`
    (y una abreviatura en `SHORT_PODCAST` de `encarta/web/app.js` si es largo).
 
 ## Libros — `~/gits/pollo/Music_Books`
 
 - **Libro nuevo**: sesión de Claude Code en `Music_Books` siguiendo su `CLAUDE.md` («Cómo hacer la web de
-  un libro nuevo»). Añadir su tarjeta a la portada (`index.html`) y una línea a `BOOKS` en `encarta/build.py`
-  (título, autor y ruta en GitHub Pages).
+  un libro nuevo»), con su tarjeta en la portada (`index.html`): de ella toma Encarta el título, el autor y la
+  ruta en GitHub Pages. Después, `atuin scripts run encarta` (no hace falta tocar `encarta/build.py`).
 - **Regenerar uno** tras cambiar sus datos: `atuin scripts run libros` (p. ej. `Postpunk`). Revisar los
   `DUDOSO` de YouTube (`tools/yt-ok.txt`) y publicar con `git push` en la carpeta del libro.
 
@@ -63,3 +66,12 @@ Los comandos están en `encarta/atuin/*.sh`. Si se cambian: `./atuin/instalar.sh
 - En local: `./main.sh` (http://127.0.0.1:8765/).
 - GitHub Pages: `atuin scripts run encarta_gh` (pide el repo, p. ej. `git@github.com:volteret4/encarta.git`).
 - Los números de las fichas son estables: los enlaces guardados siguen valiendo después de añadir datos.
+- Años que faltan (canciones citadas en podcasts sin año): `atuin scripts run encarta_fechas` los busca en
+  MusicBrainz y Discogs (~3 s cada una, se puede cortar y relanzar) y sube Encarta. Conviene tras añadir podcasts.
+
+## Grapa (artículos) — `~/gits/pollo/Music_articles`
+
+- Buscar artículos nuevos: `./main.sh fetch` (horas; se puede cortar y relanzar, sigue donde iba).
+  Más artistas: `./main.sh fetch --min-weight 10`.
+- Publicar: `./main.sh gh && ./publish_gh_pages.sh git@github.com:volteret4/grapa.git`.
+  Encarta la enlaza sola desde sus fichas en cuanto está publicada.

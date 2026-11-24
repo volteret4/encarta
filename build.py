@@ -18,6 +18,7 @@ Uso: python3 -I build.py   (rutas configurables con variables de entorno, ver PA
 """
 
 import hashlib
+import html
 import json
 import os
 import re
@@ -38,8 +39,11 @@ PATHS = {
     'books': os.environ.get('MUSIC_BOOKS', f'{POLLO}/Music_Books'),
 }
 OUT = os.environ.get('ENCARTA_DB', os.path.join(HERE, 'encarta.db'))
+# Años que fechas.py encontró en MusicBrainz/Discogs para lo que ninguna fuente fecha (tabla `year`).
+CACHE = os.environ.get('ENCARTA_CACHE', os.path.join(HERE, 'cache.db'))
 
-# Datos de cada libro que no están en sus webs (título completo, autor, URL publicada).
+# Título, autor y URL publicada de cada libro: salen solos de su tarjeta en la portada de Music_Books
+# (h2, «autor · …» y data-pages; ver book_cards). Aquí solo los que se quieren con el título completo.
 BOOKS = {
     'Scaruffi_Historia_del_Rock': ('A History of Rock Music 1951-2000', 'Piero Scaruffi', 'scaruffi'),
     'loops-timeline': ('Loops 1 y 2. Una historia de la música electrónica', 'Javier Blánquez (ed.)', 'loops_timeline'),
@@ -51,6 +55,8 @@ BOOKS = {
     'ComeUp_Abrams': ('The Come Up: An Oral History of the Rise of Hip-Hop', 'Jonathan Abrams', 'ComeUp'),
     'TechnoRebels_Sicko': ('Techno Rebels: The Renegades of Electronic Funk', 'Dan Sicko', 'TechnoRebels'),
     'Flamenco_Arbelos': ('El flamenco contado con sencillez', 'Carlos Arbelos', 'Flamenco'),
+    'Salsa_Rondon': ('El libro de la salsa', 'César Miguel Rondón', 'Salsa'),
+    'DarkWaves_OConnor': ('Dark Waves: The Synthesizer and the Dystopian Sound of Britain', 'Neil O’Connor', 'DarkWaves'),
 }
 PAGES_BASE = 'https://volteret4.github.io/'
 
@@ -59,6 +65,16 @@ PODCASTS = {
     'a_history_of_rock_music_in_500_songs': 'A History of Rock Music in 500 Songs',
     'music_radar_clan': 'Music Radar Clan',
     'central_sonora': 'Central Sonora',
+}
+
+# Web o canal de cada podcast para la portada. Si falta, se usa la URL de su podcast.env.
+PODCAST_URLS = {
+    'The Ongoing History of New Music': 'https://www.youtube.com/playlist?list=PLM8bxV0E1Gse5C3n1u-mkVSTZLL5AJICG',
+    'A History of Rock Music in 500 Songs': 'https://500songs.com/',
+    'Music Radar Clan': 'https://www.youtube.com/channel/UCcscSHEC5tA1aypzmKvcN0A',
+    'Central Sonora': 'https://www.youtube.com/channel/UCzlALrXcVwpojaHv9zji-tg',
+    'For the Record - The 70s': 'https://www.ftr70.com/',
+    'Hit Parade Music History and Music Trivia': 'https://slate.com/podcasts/hit-parade',
 }
 
 PODCAST_ALIASES = {'Ongoing History of New Music': 'The Ongoing History of New Music'}
@@ -195,21 +211,35 @@ def genre_norm(s):
     return re.sub(r' (music|musica|scene|escena)$', '', s) or s
 
 
-TITLE_RE = re.compile(r'^(.*?)\s*\(([^()]*)\)\s*(?:[–—-]\s*(.*))?$')
+# Notas entre paréntesis que los resúmenes de podcast añaden al título y no son parte de él.
+META_PAREN = re.compile(r"(?:\d{4}s?|mid-\d{4}s|early|late|undated|unknown|n/?a|unspecified|dates? unspecified|"
+                        r"lp|ep|single|album|7\W?|12\W?|(?:with|feat\.?|featuring|ft\.?) .+)", re.I)
 
 
 def split_title(raw):
-    """«Closer (1980) – Subtítulo» → ('Closer', 1980, 'Subtítulo')."""
-    raw = raw.strip()
-    m = TITLE_RE.match(raw)
-    if m and (YEAR_RE.search(m.group(2)) or 'year' in m.group(2).lower()):
-        y = YEAR_RE.search(m.group(2))
-        return m.group(1).strip(), int(y.group(1)) if y else None, (m.group(3) or '').strip()
+    """«Closer (1980) – Subtítulo» → ('Closer', 1980, 'Subtítulo'). El año sale de cualquier paréntesis
+    («Money for Nothing (1985) (with Dire Straits)» → 1985) y se quitan las notas que no son del título
+    («(LP)», «(N/A)», «(1990s)», «(Undated)», «(Year unknown)», «(with …)»); «(Remix)» o «(Live)» se quedan."""
+    year = None
+
+    def paren(m):
+        nonlocal year
+        inner = m.group(1).strip()
+        y = YEAR_RE.search(inner)
+        if y and len(inner) <= 30 and not re.search(r'\d{4}s', inner):
+            year = year or int(y.group(1))
+            return ' '
+        if META_PAREN.fullmatch(inner) or re.fullmatch(r'(?:early|mid|late)[- ]\d{4}s', inner, re.I):
+            return ' '
+        # «(Year unknown)», «(Year Not Specified)», «(Release date unclear)»…
+        return ' ' if re.search(r'\b(?:year|date)s?\b', inner, re.I) else m.group(0)
+
+    s = re.sub(r'\s+', ' ', re.sub(r'\(([^()]*)\)', paren, raw.strip())).strip() or raw.strip()
     for sep in (' – ', ' — ', ' - '):
-        if sep in raw:
-            t, sub = raw.split(sep, 1)
-            return t.strip(), None, sub.strip()
-    return raw, None, ''
+        if sep in s:
+            t, sub = s.split(sep, 1)
+            return t.strip(), year, sub.strip()
+    return s, year, ''
 
 
 EPISODES = {}  # id de vídeo de YouTube → (podcast, episodio), de los ficheros de ensayos
@@ -228,6 +258,28 @@ def load_episodes():
                 m = re.match(r'^(.+?) \[([\w-]{11})\]\.(md|txt)$', f)
                 if m and m.group(2) not in EPISODES:
                     EPISODES[m.group(2)] = (PODCASTS.get(rel, rel.replace('_', ' ')), clean_episode(m.group(1)))
+
+
+def podcast_list(db):
+    """Los podcasts de ensayos (una carpeta en transcripts/ cada uno) con su web y sus episodios en Encarta."""
+    base = os.path.join(os.path.dirname(os.path.dirname(PATHS['ensayos'])), 'transcripts')
+    out = []
+    for d in sorted(os.listdir(base)):
+        if d == 'summarized' or not os.path.isdir(os.path.join(base, d)):
+            continue
+        name = PODCAST_ALIASES.get(PODCASTS.get(d, d.replace('_', ' ')), PODCASTS.get(d, d.replace('_', ' ')))
+        url = PODCAST_URLS.get(name)
+        env = os.path.join(base, d, 'podcast.env')
+        if not url and os.path.exists(env):
+            for line in open(env, encoding='utf-8'):
+                k, _, v = line.strip().partition('=')
+                if k.lower() in ('url', 'yt_playlist', 'rss') and v.strip().strip('"'):
+                    url = v.strip().strip('"')
+                    break
+        eps, notes = db.execute("SELECT COUNT(DISTINCT episode), COUNT(*) FROM fact "
+                                "WHERE kind IN ('podcast', 'curiosity') AND source = ?", (name,)).fetchone()
+        out.append({'name': name, 'url': url, 'episodes': eps, 'notes': notes})
+    return out
 
 
 def clean_episode(ep):
@@ -323,6 +375,7 @@ class Registry:
         self.ids = {}       # (type, key) → id
         self.info = {}      # id → dict
         self.years = {}     # id → year
+        self.cands = {}     # id → [años de cada fuente, en orden]
         self.names = {}     # id → (name, artist)
         self.space = IdSpace()
 
@@ -354,8 +407,10 @@ class Registry:
             self.names[eid] = (name, (artist or '').strip() or None)
         elif type_ == 'artist' and name.lower().startswith('the ') and not self.names[eid][0].lower().startswith('the '):
             self.names[eid] = (name, None)
-        if year and not self.years.get(eid):
-            self.years[eid] = year
+        if year:
+            self.cands.setdefault(eid, []).append(year)
+            if not self.years.get(eid):
+                self.years[eid] = year
         if info:
             cur = self.info.setdefault(eid, {})
             for f, v in info.items():
@@ -368,10 +423,44 @@ class Registry:
         for t in ('album', 'song', 'work'):
             eid = self.find(t, title, artist)
             if eid:
-                if year and not self.years.get(eid):
-                    self.years[eid] = year
+                if year:
+                    self.cands.setdefault(eid, []).append(year)
+                    if not self.years.get(eid):
+                        self.years[eid] = year
                 return eid
         return self.get(hint or 'work', title, artist, year)
+
+    def born(self):
+        """{clave de artista: año de formación o nacimiento}, solo si sus obras fechadas no lo desmienten: el año del
+        artista a veces es el de otro con el mismo nombre (The Monks 1979, Ghost el sueco)."""
+        works = {}
+        for (t, k), eid in self.ids.items():
+            if t in ('album', 'song', 'work') and self.years.get(eid):
+                works.setdefault(k.split('|', 1)[0], []).append(self.years[eid])
+        out = {}
+        for k, ys in works.items():
+            aid = self.ids.get(('artist', k))
+            b = self.years.get(aid) if aid else None
+            # con una sola obra de antes, puede ser la versión; con más, el año del artista está mal
+            if b and len([y for y in ys if y < b - 1]) <= 1:
+                out[k] = b
+        return out
+
+    def drop_covers(self):
+        """Un artista no tiene obras de antes de existir: ese año es el del original (los resúmenes ponen
+        «Have a Cigar (1975)» en la versión de Foo Fighters). Se queda el siguiente año que dé otra fuente,
+        o ninguno y fechas.py busca el de la versión. Solo con el año de los podcasts: el de una lista o un
+        libro va con su disco, y si choca es que el artista es otro con el mismo nombre (Finch, Felt…)."""
+        born, n = self.born(), 0
+        trusted = {e for (e,) in self.db.execute('SELECT entity_id FROM list_item UNION SELECT entity_id FROM mb_track')}
+        for (t, k), eid in self.ids.items():
+            b = born.get(k.split('|', 1)[0])
+            if (t in ('album', 'song', 'work') and b and self.years.get(eid) and self.years[eid] < b - 1
+                    and eid not in trusted):
+                self.years[eid] = next((y for y in self.cands.get(eid, []) if y >= b - 1), None)
+                n += 1
+        self.born_years = born
+        return n
 
     def flush(self):
         type_of = {v: k[0] for k, v in self.ids.items()}
@@ -657,14 +746,34 @@ def load_music_db(reg):
     log(f'  music.db: {n} artistas y {m} portadas')
 
 
+def book_cards():
+    """{carpeta: (título, autor, ruta en GitHub Pages)} de las tarjetas de la portada de Music_Books:
+    <a class="book …" href="Carpeta/index.html" data-pages="/Ruta/"> … <h2>Título</h2> <p class="by">Autor · …</p>"""
+    try:
+        with open(os.path.join(PATHS['books'], 'index.html'), encoding='utf-8') as f:
+            page = f.read()
+    except OSError:
+        return {}
+    cards = {}
+    for m in re.finditer(r'<a class="book[^"]*" href="([^"/]+)/index\.html"(?: data-pages="/?([^"]*?)/?")?>(.*?)</a>', page, re.S):
+        title = re.search(r'<h2>(.*?)</h2>', m.group(3), re.S)
+        by = re.search(r'<p class="by">(.*?)</p>', m.group(3), re.S)
+        clean = lambda x: html.unescape(re.sub(r'<[^>]+>', '', x)).strip()
+        cards[m.group(1)] = (clean(title.group(1)) if title else None,
+                             clean(by.group(1)).split(' · ')[0] if by else '', m.group(2) or None)
+    return cards
+
+
 def load_books(reg, w, db):
     dump = subprocess.run(['node', os.path.join(HERE, 'build', 'dump_books.js'), PATHS['books']],
                           capture_output=True, text=True, check=True)
     if dump.stderr.strip():
         print(dump.stderr.strip(), file=sys.stderr)
     books = json.loads(dump.stdout)
+    cards = book_cards()
     for b in books:
-        title, author, pages = BOOKS.get(b['slug'], (b['title'], '', None))
+        card = cards.get(b['slug'], (None, '', None))
+        title, author, pages = BOOKS.get(b['slug'], (card[0] or b['title'], card[1], card[2]))
         url = f'{PAGES_BASE}{pages}/' if pages else None
         bid = db.execute('INSERT INTO mb_book (slug, ns, title, author, url, families) VALUES (?,?,?,?,?,?)',
                          (b['slug'], b['ns'], title, author, url, json.dumps(b['families'], ensure_ascii=False))).lastrowid
@@ -751,6 +860,54 @@ UPDATE entity SET weight =
 '''
 
 
+def one_hit_wonders(db):
+    """Tabla `ohw`: artistas con como mucho una mención en cada categoría (libros, podcasts, listas) y alguna en total.
+    Libros: discos citados, pasajes y escenas propias; podcasts: notas del artista y de sus obras; listas: entradas de
+    sus obras en listas (21 discos en el mismo top de género son 21 menciones)."""
+    by = dict(db.execute("SELECT b, a FROM rel WHERE kind = 'by'"))
+    books, pods, lists = {}, {}, {}
+    for q in ('SELECT artist_id FROM mb_track', 'SELECT entity_id FROM mb_mention', 'SELECT entity_id FROM mb_scene'):
+        for (a,) in db.execute(q):
+            books[a] = books.get(a, 0) + 1
+    for (e,) in db.execute("SELECT entity_id FROM fact WHERE kind = 'podcast' AND entity_id IS NOT NULL"):
+        a = by.get(e, e)
+        pods[a] = pods.get(a, 0) + 1
+    for l, e in db.execute('SELECT DISTINCT list_id, entity_id FROM list_item'):
+        if e in by:
+            lists[by[e]] = lists.get(by[e], 0) + 1
+    ohw = []
+    for (a,) in db.execute("SELECT id FROM entity WHERE type = 'artist'"):
+        n = (books.get(a, 0), pods.get(a, 0), lists.get(a, 0))
+        if max(n) <= 1 and sum(n) >= 1:
+            ohw.append((a,))
+    db.execute('CREATE TABLE ohw (id INTEGER PRIMARY KEY)')
+    db.executemany('INSERT INTO ohw VALUES (?)', ohw)
+    return len(ohw)
+
+
+def load_found_years(reg):
+    """Año de fechas.py para los discos y canciones sin año de ninguna fuente; su origen va a info.year_src."""
+    if not os.path.exists(CACHE):
+        return 0
+    con = sqlite3.connect(f'file:{CACHE}?mode=ro', uri=True)
+    try:
+        rows = con.execute('SELECT type, key, year, source, url, note FROM year WHERE year IS NOT NULL').fetchall()
+    except sqlite3.OperationalError:  # aún no se ha ejecutado fechas.py
+        rows = []
+    con.close()
+    n = 0
+    for typ, key, year, src, url, note in rows:
+        eid = reg.ids.get((typ, key))
+        b = reg.born_years.get(key.split('|', 1)[0])
+        if b and year < b - 1:  # ver drop_covers
+            continue
+        if eid and not reg.years.get(eid):
+            reg.years[eid] = year
+            reg.info.setdefault(eid, {})['year_src'] = {k: v for k, v in (('src', src), ('url', url), ('note', note)) if v}
+            n += 1
+    return n
+
+
 def main():
     for k, p in PATHS.items():
         if not os.path.exists(p):
@@ -776,6 +933,8 @@ def main():
     load_books(reg, w, db)
     log('fotos y portadas…')
     load_music_db(reg)
+    log(f'  {reg.drop_covers()} años de antes de existir el artista quitados (versiones)')
+    log(f'  {load_found_years(reg)} años de fechas.py')
 
     log('escribiendo entidades y hechos…')
     reg.flush()
@@ -783,8 +942,10 @@ def main():
     db.executescript(INDEXES)
     log('pesos…')
     db.executescript(WEIGHTS)
+    log(f'  {one_hit_wonders(db)} one-hit wonders')
     db.execute('INSERT INTO meta VALUES (?,?)', ('built', time.strftime('%Y-%m-%d %H:%M')))
     db.execute('INSERT INTO meta VALUES (?,?)', ('sources', json.dumps(PATHS)))
+    db.execute('INSERT INTO meta VALUES (?,?)', ('podcasts', json.dumps(podcast_list(db), ensure_ascii=False)))
     db.commit()
     db.execute('ANALYZE')
     db.close()

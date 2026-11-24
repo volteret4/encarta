@@ -14,7 +14,11 @@ case "${1:-all}" in
     build)  python3 -I build.py ;;
     serve)  python3 -I serve.py --port "$PORT" ;;
     deploy) python3 -I build.py && ./deploy_pepecono.sh ;;
-    static) python3 -I build_static.py --min "${MIN:-10}" ;;
+    static)
+        # Los vídeos rotos que se encontraron reproduciendo en local y en pepecono (cache.db de cada uno).
+        PEPE_CACHE="$(mktemp --suffix=.db)"; trap 'rm -f "$PEPE_CACHE"' EXIT
+        scp -q pepecono:contenedores/repeat-one/services/encarta/data/cache.db "$PEPE_CACHE" 2>/dev/null || echo "(sin la caché de pepecono)"
+        python3 -I build_static.py --min "${MIN:-10}" --cache cache.db --cache "$PEPE_CACHE" ;;
     all)    python3 -I build.py && python3 -I serve.py --port "$PORT" ;;
     *)      echo "Uso: $0 [build|serve|deploy|static]"; exit 1 ;;
 esac

@@ -53,19 +53,32 @@ const badge = (t) => `<span class="badge ${t}">${TYPES[t] || t}</span>`;
 const chip = (c) => (c ? `<span class="chip" style="background:${esc(c)}"></span>` : '');
 const years = (a, b) => (a ? (b && b !== a ? `${a}–${b}` : `${a}`) : '');
 
+// One-hit wonder: artista con como mucho una mención en libros, otra en podcasts y otra en listas (tabla ohw de build.py).
+const OHW_TITLE = 'One-hit wonder: como mucho una mención en libros, una en podcasts y una en listas';
+const ohw = (e) => (e && e.ohw ? `<sub class="ohw" title="${OHW_TITLE}">1</sub>` : '');
+
 function link(e, label) {
   const name = label ?? e.name;
-  if (!e || !e.id || (STATIC && !STATIC.ids.has(e.id))) return `<span class="nolink">${esc(name)}</span>`;
-  return `<a href="#/e/${e.id}">${esc(name)}</a>`;
+  if (!e || !e.id || (STATIC && !STATIC.ids.has(e.id))) return `<span class="nolink">${esc(name)}</span>${ohw(e)}`;
+  return `<a href="#/e/${e.id}">${esc(name)}</a>${ohw(e)}`;
 }
 // Enlace a una lista; en la versión estática solo si se exportó.
 function listLink(id, html, cls = '', title = '') {
   const attrs = `${cls ? ` class="${cls}"` : ''}${title ? ` title="${title}"` : ''}`;
-  if (STATIC && !STATIC.lists.has(id)) return `<span${attrs}>${html}</span>`;
+  if (STATIC && !STATIC.lists.has(id)) {
+    const slug = STATIC.rym[id];  // «RYM Top»: su página en la web de must hear
+    return slug ? `<a${attrs} href="${RYM_CHARTS}${slug}/index.html" target="_blank" rel="noopener">${html}</a>` : `<span${attrs}>${html}</span>`;
+  }
   return `<a${attrs} href="#/lista/${id}">${html}</a>`;
 }
 const yearLink = (y) => (y ? `<a href="#/year/${y}">${y}</a>` : '');
 const artistOf = (e) => (e.artist ? ` <span class="muted">— ${esc(e.artist)}</span>` : '');
+// Iconos Airsonic / qBittorrent / escuchado / Mix (owned-badges.js de ya-lo-tengo,
+// cargado en web/index.html): hueco vacío que el script rellena. Sin disco = artista.
+const owned = (artist, album) => (artist
+  ? `<span class="owned" data-owned-artist="${esc(artist)}"${album ? ` data-owned-album="${esc(album)}"` : ''}></span>`
+  : '');
+const OWNED_TYPES = new Set(['album', 'work']);
 
 const cache = new Map();
 async function api(path) {
@@ -82,6 +95,52 @@ async function getJson(url) {
   return r.json();
 }
 
+// ── Grapa (fanzine de artículos: repo ../Music_articles, publicado en su propio GitHub Pages) ──
+// Todas las versiones de Encarta (local, pepecono, estática) leen su índice publicado: GitHub Pages
+// permite pedirlo desde otro dominio. Si no responde, las fichas salen sin la sección.
+const GRAPA_URL = 'https://volteret4.github.io/grapa/';
+let grapaIndex = null;
+function loadGrapa() {
+  if (!grapaIndex) {
+    grapaIndex = fetch(GRAPA_URL + 'data/artistas.json')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => (d ? { base: GRAPA_URL, ...d } : null))
+      .catch(() => null);
+  }
+  return grapaIndex;
+}
+let grapaOutlets = null;
+// Fuentes (cabeceras) de Grapa con sus cifras: [{nombre, dominio, url, pagina, articulos, notas, tipos}].
+function loadGrapaOutlets() {
+  if (!grapaOutlets) {
+    grapaOutlets = fetch(GRAPA_URL + 'data/cabeceras.json')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => (d && Array.isArray(d.cabeceras) ? d.cabeceras : null))
+      .catch(() => null);
+  }
+  return grapaOutlets;
+}
+let GRAPA = null;  // índice ya cargado: { base, articles, artists: {id: {tipo: n}}, albums: {id: [artista, n]} }
+
+const GRAPA_KINDS = [['reseña', 'reseña', 'reseñas'], ['entrevista', 'entrevista', 'entrevistas'],
+  ['artículo', 'artículo', 'artículos'], ['noticia', 'noticia', 'noticias']];
+function grapaSection(A, e) {
+  if (!GRAPA) return;
+  if (e.type === 'artist') {
+    const k = GRAPA.artists[e.id];
+    if (!k) return;
+    const n = Object.values(k).reduce((a, b) => a + b, 0);
+    const parts = GRAPA_KINDS.filter(([key]) => k[key]).map(([key, one, many]) => plural(k[key], one, many));
+    A.section('En la prensa', `<p>${parts.join(', ')} sobre ${esc(e.name)} en
+      <a class="ext" href="${esc(GRAPA.base)}artista/${e.id}.html" target="_blank" rel="noopener">Grapa</a>, el fanzine de recortes.</p>`, n);
+  } else {
+    const a = GRAPA.albums[e.id];
+    if (!a) return;
+    A.section('En la prensa', `<p>${plural(a[1], 'reseña o artículo', 'reseñas y artículos')} sobre este disco en
+      <a class="ext" href="${esc(GRAPA.base)}artista/${a[0]}.html#d${e.id}" target="_blank" rel="noopener">Grapa</a>.</p>`, a[1]);
+  }
+}
+
 // ── Versión estática (GitHub Pages) ──────────────────────────────────────────
 // build_static.py exporta las fichas a data/*.json y pone window.ENCARTA_STATIC = true en
 // index.html. Sin servidor: la búsqueda va sobre data/index.json en el navegador, las fotos
@@ -95,6 +154,7 @@ async function loadStatic() {
   STATIC = {
     rows: rows.map(([id, type, name, artist, year, weight]) => ({ id, type, name, artist, year, weight, s: snorm(`${name} ${artist || ''}`), n: snorm(name) })),
     lists: new Set(stats.lists_exported),
+    rym: stats.rym_slugs || {},
     threshold: stats.threshold,
   };
   STATIC.ids = new Set(STATIC.rows.map((r) => r.id));
@@ -120,6 +180,23 @@ async function staticApi(path) {
     const hits = STATIC.rows.filter((r) => q && r.s.includes(q) && (!types || types.includes(r.type)));
     hits.sort((a, b) => (b.n === q) - (a.n === q) || b.n.startsWith(q) - a.n.startsWith(q) || b.weight - a.weight);
     return { q, results: hits.slice(0, limit) };
+  }
+  if (kind === 'browse') {
+    const types = TYPE_FILTER[qs.get('type')] || ['artist'];
+    const q = snorm(qs.get('q'));
+    const per = Number(qs.get('per') || 100);
+    const page = Number(qs.get('page') || 1);
+    const hits = STATIC.rows.filter((r) => types.includes(r.type) && (!q || r.s.includes(q)));
+    return { total: hits.length, page, per, items: hits.slice((page - 1) * per, page * per) };
+  }
+  if (kind === 'sample') {
+    const types = TYPE_FILTER[qs.get('type')] || ['artist'];
+    const pool = STATIC.rows.filter((r) => r.weight >= 25 && r.name.length <= 60 && types.includes(r.type));
+    const out = [];
+    for (let i = 0; i < Number(qs.get('n') || 12) && pool.length; i++) {
+      out.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+    }
+    return out;
   }
   if (kind === 'random') {
     const types = TYPE_FILTER[qs.get('type')];
@@ -203,7 +280,9 @@ class Article {
     const id = 's-' + (this.secs.length + 1);
     this.secs.push({ id, title });
     const c = count ? `<span class="count">${count.toLocaleString('es')}</span>` : '';
-    const closed = closedSections().includes(title) ? ' closed' : '';
+    // Plegadas salvo la primera; lo que el usuario abre o pliega a mano se recuerda por título.
+    const saved = sectionState()[title];
+    const closed = (saved ? saved === 'closed' : this.secs.length > 1) ? ' closed' : '';
     this.parts.push(`<section class="sec${closed}" data-title="${esc(title)}">
       <h2 id="${id}" class="sec-h" title="Plegar o desplegar"><span class="chev" aria-hidden="true"></span>${esc(title)}${c}</h2>
       <div class="sec-body">${body}</div></section>`);
@@ -351,7 +430,7 @@ function worksTable(works, id, artist) {
   if (!works.length) return '';
   return (works.length > 15 ? filterBox(id, 'Filtrar discografía (título, libro, podcast o lista)…') : '') + legend() + `<table class="wikitable" id="${id}">
     <tr><th class="num">Año</th><th>Título</th><th>Tipo</th><th>Fuentes</th></tr>
-    ${works.map((w) => `<tr data-f><td class="num">${yearLink(w.year)}</td><td>${playWork(w, artist)}${link(w)}</td><td>${badge(w.type)}</td>
+    ${works.map((w) => `<tr data-f><td class="num">${yearLink(w.year)}</td><td>${playWork(w, artist)}${link(w)}${OWNED_TYPES.has(w.type) ? owned(artist, w.name) : ''}</td><td>${badge(w.type)}</td>
       <td>${sourcesCell(w.from)}</td></tr>`).join('')}
   </table>`;
 }
@@ -394,14 +473,68 @@ function listsTable(lists) {
 function entityTable(items, cols_ = ['year', 'name', 'artist']) {
   if (!items.length) return '';
   if (items.some((e) => e.from) && !cols_.includes('from')) cols_ = [...cols_, 'from'];
-  const head = { year: '<th class="num">Año</th>', name: '<th>Título</th>', artist: '<th>Artista</th>', rank: '<th class="num">#</th>', type: '<th>Tipo</th>', from: '<th>Fuentes</th>' };
+  const head = { year: '<th class="num">Año</th>', name: '<th>Título</th>', artist: '<th>Artista</th>', rank: '<th class="num">#</th>', type: '<th>Tipo</th>', from: '<th>Fuentes</th>',
+    refs: '<th class="num" title="Libros, notas de podcast y listas que lo citan">Refs</th>' };
   const cell = {
     year: (e) => `<td class="num">${yearLink(e.year)}</td>`, name: (e) => `<td>${playWork(e)}${link(e)}</td>`,
     artist: (e) => `<td>${esc(e.artist || '')}</td>`, rank: (e) => `<td class="num">${e.rank ?? ''}</td>`, type: (e) => `<td>${badge(e.type)}</td>`,
-    from: (e) => `<td>${sourcesCell(e.from)}</td>`,
+    from: (e) => `<td>${sourcesCell(e.from)}</td>`, refs: (e) => `<td class="num">${refsOf(e) || ''}</td>`,
   };
   return `${cols_.includes('from') ? legend() : ''}<table class="wikitable"><tr>${cols_.map((c) => head[c]).join('')}</tr>
     ${items.map((e) => `<tr>${cols_.map((c) => cell[c](e)).join('')}</tr>`).join('')}</table>`;
+}
+
+// Referencias de un disco o canción: libros + notas de podcast + listas (lo que cuenta su columna «Fuentes»).
+const refsOf = (e) => (e.from ? e.from.books.length + e.from.podcasts.reduce((n, p) => n + p.n, 0) + e.from.n_lists : 0);
+const byRefs = (items) => items.slice().sort((a, b) => refsOf(b) - refsOf(a) || (b.weight || 0) - (a.weight || 0));
+
+// Línea de tiempo: una barra por elemento desde su inicio a su fin (o hasta hoy) y una raya en el año de la página.
+// items: { label (html), start, end, color, title, strong }
+function timeline(items, y, openEnd) {
+  if (!items.length) return '';
+  const now = new Date().getFullYear();
+  const endOf = (x) => x.end || (openEnd ? now : x.start);
+  // Ventana de 40 años antes y 30 después del año: lo que sale de ella se corta en el borde.
+  let lo = Math.max(y - 40, Math.min(y - 5, ...items.map((x) => x.start)));
+  let hi = Math.min(y + 30, Math.max(y, ...items.map(endOf)));
+  lo = Math.floor(lo / 5) * 5;
+  hi = Math.max(lo + 10, Math.ceil((hi + 1) / 5) * 5);
+  const pct = (v) => ((v - lo) / (hi - lo)) * 100;
+  const step = hi - lo > 60 ? 20 : hi - lo > 30 ? 10 : 5;
+  const ticks = [];
+  for (let t = Math.ceil(lo / step) * step; t < hi; t += step) ticks.push(`<span style="left:${pct(t)}%">${t}</span>`);
+  const rows = items.map((x) => {
+    const a = pct(Math.max(x.start, lo)), b = pct(Math.min(endOf(x) + 1, hi));
+    const cut = `${x.start < lo ? ' cut-l' : ''}${endOf(x) + 1 > hi ? ' cut-r' : ''}`;
+    return `<div class="tl-row${x.strong ? ' strong' : ''}"><div class="tl-label">${x.label}</div>
+      <div class="tl-track" style="--y:${pct(y + 0.5)}%"><span class="tl-bar${cut}" style="left:${a}%;width:${Math.max(b - a, 0.8)}%${x.color ? `;background:${esc(x.color)}` : ''}" title="${esc(x.title || '')}"></span></div></div>`;
+  }).join('');
+  return `<div class="timeline"><div class="tl-row tl-axis"><div class="tl-label"></div><div class="tl-track" style="--y:${pct(y + 0.5)}%">${ticks.join('')}</div></div>${rows}</div>`;
+}
+
+// Notas de podcast de un año agrupadas por tipo de ficha y, dentro, por ficha (la de más notas primero).
+const FACT_GROUPS = [['artist', 'Artistas'], ['album', 'Discos'], ['work', 'Discos y canciones'], ['song', 'Canciones'],
+  ['label', 'Sellos'], ['genre', 'Géneros'], [null, 'Otras']];
+function groupedFacts(facts, A) {
+  return FACT_GROUPS.map(([type, title]) => {
+    const mine = facts.filter((f) => (FACT_GROUPS.some(([t]) => t && t === f.type) ? f.type : null) === type);
+    if (!mine.length) return '';
+    const byEnt = new Map();
+    for (const f of mine) {
+      const k = f.id || f.title;
+      if (!byEnt.has(k)) byEnt.set(k, []);
+      byEnt.get(k).push(f);
+    }
+    const ents = [...byEnt.values()].sort((a, b) => b.length - a.length);
+    return `<h3>${title} <span class="muted small">(${plural(mine.length, 'nota', 'notas')})</span></h3>
+      ${ents.map((fs, i) => {
+        const name = fs[0].id ? link(fs[0]) : esc(fs[0].title || 'Sin ficha');
+        const list = factList(fs, A, `f-year-${type || 'x'}-${i}`);
+        // Con más de 2 notas, plegadas bajo el nombre para que una ficha no tape a las demás.
+        return fs.length > 2 ? `<details class="more fact-group"><summary><b>${name}</b> <span class="muted small">${plural(fs.length, 'nota', 'notas')}</span></summary>${list}</details>`
+          : `<h4>${name}</h4>${list}`;
+      }).join('')}`;
+  }).join('');
 }
 
 function linksRow(links) {
@@ -443,7 +576,7 @@ function renderArtist(e) {
   const labels = e.labels.length ? e.labels : e.album_labels;
   const tags = Array.isArray(i.tags) ? i.tags.slice(0, 8).join(', ') : '';
   const isGroup = /group|orchestra|choir/i.test(i.kind || '') || e.members.length > 1;
-  A.add(`<h1>${esc(e.name)}</h1><div class="tagline">${badge('artist')}</div>`);
+  A.add(`<h1>${esc(e.name)}${ohw(e)}${owned(e.name)}</h1><div class="tagline">${badge('artist')}</div>`);
   A.add(infobox({
     title: e.name, img: i.img, id: e.id,
     rows: [
@@ -457,6 +590,7 @@ function renderArtist(e) {
       ['Miembro de', inline(e.member_of)],
       ['Alias', esc(aliases(i))],
       ['Similares', esc(Array.isArray(i.similar) ? i.similar.slice(0, 6).join(', ') : i.similar || '')],
+      ['One-hit wonder', e.ohw ? `<span title="${OHW_TITLE}">Sí</span>` : ''],
       ['Oyentes', i.listeners ? Number(i.listeners).toLocaleString('es') + ' (Last.fm)' : ''],
       ['Enlaces', linksRow(i.links)],
     ],
@@ -493,6 +627,7 @@ function renderArtist(e) {
   const named = e.concerts.filter((c) => !c.body && !told.some((t) => t.title === c.title));
   A.section('Conciertos', factList(told, A, 'f-concerts') + (named.length ? `${told.length ? '<h3>Otros conciertos</h3>' : ''}${inline(named, (c) => esc(c.title))}` : ''),
     told.length + named.length);
+  grapaSection(A, e);
   if (e.xref.length) {
     A.section('Mencionado en otras fichas', `<p class="small muted">Notas de podcast sobre otros artistas que también hablan de ${esc(e.name)}.</p>
       <details class="more"><summary>Ver ${e.xref.length} notas</summary>${factList(e.xref, A, 'f-xref')}</details>`, e.xref.length);
@@ -504,7 +639,7 @@ function renderWork(e) {
   const A = new Article();
   const i = e.info;
   const what = { album: 'un álbum', song: 'una canción', work: 'un disco o canción' }[e.type];
-  A.add(`<h1>${esc(e.name)}${e.artist ? ` <span class="by">— ${esc(e.artist)}</span>` : ''}</h1>
+  A.add(`<h1>${esc(e.name)}${e.artist ? ` <span class="by">— ${esc(e.artist)}</span>` : ''}${OWNED_TYPES.has(e.type) ? owned(e.artist, e.name) : ''}</h1>
     <div class="tagline">${badge(e.type)}</div>`);
   const scores = [
     i.scaruffi != null && ['Scaruffi', `<span class="score">${i.scaruffi}</span>/10`],
@@ -519,7 +654,8 @@ function renderWork(e) {
     caption: e.artist_ref ? `${TYPES[e.type]} de ${link(e.artist_ref)}` : '',
     rows: [
       ['Artista', e.artist_ref ? link(e.artist_ref) : esc(e.artist || '')],
-      ['Publicación', yearLink(e.year)],
+      // Año buscado por fechas.py (ninguna fuente lo daba): se dice de dónde sale
+      ['Publicación', `${yearLink(e.year)}${i.year_src ? ` <span class="small muted" title="${esc(i.year_src.note ? 'Dudosa: ' + i.year_src.note : 'Ninguna fuente de Encarta daba el año')}">(${i.year_src.url ? ext(i.year_src.url, 'según ' + i.year_src.src) : 'según ' + esc(i.year_src.src)}${i.year_src.note ? ', dudosa' : ''})</span>` : ''}`],
       ['Formato', esc(i.kind || '')],
       ['Sello', e.labels.length ? inline(e.labels) : esc(i.label || '')],
       ['Géneros', inline(e.genres.slice(0, 10))],
@@ -545,6 +681,7 @@ function renderWork(e) {
   A.section('En los libros', bookTracks(e.book_tracks), nBooks);
   A.section('En los podcasts', factList(e.podcast, A, 'f-podcast'), e.podcast.length);
   A.section('En listas y charts', listsTable(e.lists), e.lists.length);
+  grapaSection(A, e);
   A.section(`Más de ${e.artist || 'este artista'}`, e.others.length ? inline(e.others, (o) => `${link(o)} <span class="muted small">${o.year || ''}</span>`) : '');
   A.render();
 }
@@ -601,7 +738,8 @@ function renderGenre(e) {
 }
 
 async function showEntity(id) {
-  const e = await api('entity/' + id);
+  const [e, g] = await Promise.all([api('entity/' + id), loadGrapa()]);
+  GRAPA = g;
   document.title = `${e.name} — Encarta`;
   if (e.type === 'artist') return renderArtist(e);
   if (e.type === 'label') return renderLabel(e);
@@ -619,17 +757,30 @@ async function showYear(y) {
   const active = d.scenes.filter((s) => !s.born);
   A.add(`<p class="lead">En <b>${y}</b> ${born.length ? `nacen ${plural(born.length, 'escena', 'escenas')} según los libros y ` : ''}siguen activas
     ${plural(active.length, 'escena', 'escenas')}. ${coverage({ podcast: d.facts.length, works: d.albums.length + d.songs.length })}</p>`);
-  A.section('Escenas', (born.length ? `<h3>Nacen este año</h3>${sceneList(born)}` : '') +
-    (active.length ? `<details class="more"><summary>En activo (${active.length})</summary>${sceneList(active)}</details>` : ''), d.scenes.length);
+  // En la línea: las que nacen y las 30 activas que empezaron más cerca de este año; el resto, desplegable.
+  const TL_SCENES = 30;
+  const sceneTl = (s) => ({
+    label: `${chip(s.color)}${s.id ? link(s) : esc(s.name)}`, start: s.start, end: s.end, color: s.color, strong: s.born,
+    title: `${s.name} (${years(s.start, s.end)}) — ${s.book}`,
+  });
+  const recent = active.slice().sort((a, b) => b.start - a.start);
+  A.section('Escenas', `${born.length ? '<p class="small muted">En negrita, las que nacen este año.</p>' : ''}
+    ${timeline([...born, ...recent.slice(0, TL_SCENES)].map(sceneTl), y)}
+    ${recent.length > TL_SCENES ? `<details class="more"><summary>Ver las ${recent.length} activas</summary>${timeline(recent.map(sceneTl), y)}</details>` : ''}
+    ${born.length ? `<details class="more"><summary>Descripción de las que nacen (${born.length})</summary>${sceneList(born)}</details>` : ''}
+    ${active.length ? `<details class="more"><summary>Descripción de las que siguen activas (${active.length})</summary>${sceneList(active)}</details>` : ''}`, d.scenes.length);
   A.section('Discos esenciales en los libros', bookTracks(d.book_tracks, true), d.book_tracks.length);
-  A.section('Discos del año', entityTable(d.albums, ['name', 'artist', 'type']), d.albums.length);
-  A.section('Canciones', entityTable(d.songs, ['name', 'artist']), d.songs.length);
+  A.section('Discos del año', entityTable(byRefs(d.albums), ['refs', 'name', 'artist', 'type']), d.albums.length);
+  A.section('Canciones', entityTable(byRefs(d.songs), ['refs', 'name', 'artist']), d.songs.length);
   A.section('Charts', d.charts.map((c) => `<h3>${listLink(c.id, esc(c.name))}</h3>
     ${isScaruffi(c.name)
     ? `<ul class="plain">${c.items.map((x) => `<li>${playWork(x)}${link(x)}${artistOf(x)}${x.scaruffi != null ? ` <span class="muted small">${score(x.scaruffi)}/10 (nota Scaruffi)</span>` : ''}</li>`).join('')}</ul>`
     : `<ol class="plain">${c.items.map((x) => `<li value="${x.rank ?? ''}">${playWork(x)}${link(x)}${artistOf(x)}${x.note ? ` <span class="muted small">${esc(x.note)}</span>` : ''}</li>`).join('')}</ol>`}`).join(''), d.charts.length);
-  A.section('Artistas que empiezan', cols(d.artists), d.artists.length);
-  A.section('Notas de podcast', factList(d.facts, A, 'f-year', { entity: true }), d.facts.length);
+  const TL_ARTISTS = 40;
+  const artistsTl = d.artists.slice(0, TL_ARTISTS).map((a) => ({ label: link(a), start: a.year, end: a.end, title: `${a.name}: ${years(a.year, a.end) || a.year}${a.end ? '' : ' – hoy'}` }));
+  A.section('Artistas que empiezan', timeline(artistsTl, y, true) +
+    (d.artists.length > TL_ARTISTS ? `<details class="more"><summary>Otros ${d.artists.length - TL_ARTISTS}</summary>${cols(d.artists.slice(TL_ARTISTS))}</details>` : ''), d.artists.length);
+  A.section('Notas de podcast', groupedFacts(d.facts, A), d.facts.length);
   A.render();
 }
 
@@ -664,30 +815,155 @@ async function showSearch(q, t) {
   A.render();
 }
 
+// Páginas de rym_lastfm publicadas en volteret4.github.io.
+const RYM_GENRE_TREE = 'https://volteret4.github.io/must_hear/rym_genre_tree.html';
+const RYM_CHARTS = 'https://volteret4.github.io/must_hear/rym_charts/';
+
+// Recuadros de la portada: los de fichas se piden al servidor al azar; libros, podcasts y fuentes de
+// Grapa se barajan en el navegador. Cada uno con «↻» (otros al azar) y «→» (página con todo).
+const SAMPLE = { artist: 14, album: 12, label: 14, genre: 16, book: 10, podcast: 15, outlet: 15 };
+const HOME = { book: [], podcast: [], outlet: [] };
+const ALL = { artist: 'artistas', album: 'discos', label: 'sellos', genre: 'generos', book: 'libros', podcast: 'podcasts', outlet: 'articulos' };
+
+function pick(arr, n) {
+  const pool = arr.slice();
+  const out = [];
+  while (out.length < n && pool.length) out.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+  return out;
+}
+
+// El título enlaza a la web del libro, como el nombre en los demás recuadros.
+const bookTitle = (b) => (b.url ? `<a href="${esc(b.url)}" target="_blank" rel="noopener"><i>${esc(b.title)}</i></a>` : `<i>${esc(b.title)}</i>`);
+const bookItem = (b) => `<li>${bookTitle(b)} <span class="muted">— ${esc(b.author)}</span></li>`;
+const podcastItem = (p) => `<li>${p.url ? ext(p.url, p.name) : esc(p.name)} <span class="muted small">${plural(p.episodes, 'episodio', 'episodios')}</span></li>`;
+const outletItem = (o) => `<li>${ext(o.pagina ? GRAPA_URL + o.pagina : o.url, o.nombre)} <span class="muted small">${plural(o.articulos || 0, 'artículo', 'artículos')}</span></li>`;
+
+async function sampleBlock(type) {
+  if (type === 'book') return `<ul class="plain">${pick(HOME.book, SAMPLE.book).map(bookItem).join('')}</ul>`;
+  if (type === 'podcast') return `<ul class="plain">${pick(HOME.podcast, SAMPLE.podcast).map(podcastItem).join('')}</ul>`;
+  if (type === 'outlet') return HOME.outlet.length ? `<ul class="plain">${pick(HOME.outlet, SAMPLE.outlet).map(outletItem).join('')}</ul>` : '';
+  const items = await api(`sample?type=${type}&n=${SAMPLE[type]}&_=${Date.now()}`);
+  return type === 'album' ? inline(items, (x) => `${link(x)}${artistOf(x)}`) : inline(items);
+}
+
 async function showHome() {
   document.title = 'Encarta';
-  const s = await api('stats');
   toc.innerHTML = '';
+  const [s, grapa, outlets] = await Promise.all([api('stats'), loadGrapa(), loadGrapaOutlets()]);
+  HOME.book = s.books;
+  HOME.podcast = s.podcasts || [];
+  HOME.outlet = outlets || [];
+  const types = ['artist', 'album', 'label', 'genre', 'book', 'podcast', 'outlet'];
+  const blocks = Object.fromEntries(types.map((t, i) => [t, i]));
+  const html = await Promise.all(types.map(sampleBlock));
+  const box = (t) => `<div data-sample-box="${t}">${html[blocks[t]]}</div>`;
+  const head = (title, t) => `<h2>${title}
+    <button type="button" class="reshuffle" data-sample="${t}" title="Otros al azar">↻</button>
+    <a class="see-all" href="#/todos/${ALL[t]}" title="Ver la lista completa">→</a></h2>`;
   const n = (k) => (s[k] || 0).toLocaleString('es');
   const decades = [];
   for (let d = 1920; d <= 2020; d += 10) {
-    decades.push(`<div><b>${d}s</b><div class="years">${Array.from({ length: 10 }, (_, i) => d + i).filter((y) => y <= 2026).map(yearLink).join(' ')}</div></div>`);
+    decades.push(`<details class="decade"><summary>${d}s</summary><div class="years">${Array.from({ length: 10 }, (_, i) => d + i).filter((y) => y <= 2026).map(yearLink).join(' ')}</div></details>`);
   }
   main.innerHTML = `<div class="home">
-    <h1>Encarta</h1>
-    <p class="welcome">${n('artist')} artistas, ${n('album')} álbumes, ${n('song')} canciones,
-      ${n('label')} sellos y ${n('genre')} géneros, con ${n('facts')} notas de podcast, ${s.books.length} libros y ${n('lists')} listas.
-      <br><span class="muted small">Datos de ${esc(s.built)} · <a href="#/azar">Abrir una entrada al azar</a></span>
-</p>
     <div class="portal">
-      <section><h2>Artistas destacados</h2>${inline(s.top.artist)}</section>
-      <section><h2>Discos destacados</h2>${inline(s.top.album, (x) => `${link(x)}${artistOf(x)}`)}</section>
-      <section><h2>Géneros</h2>${inline(s.top.genre)}</section>
-      <section><h2>Sellos</h2>${inline(s.top.label)}</section>
-      <section><h2>Libros</h2><ul class="plain">${s.books.map((b) => `<li><i>${esc(b.title)}</i> <span class="muted">— ${esc(b.author)}</span> ${b.url ? ext(b.url, 'web') : ''}</li>`).join('')}</ul></section>
-      <section><h2>Por año</h2>${decades.join('')}</section>
-    </div></div>`;
+      <section>${head('Artistas al azar', 'artist')}${box('artist')}</section>
+      <section>${head('Discos al azar', 'album')}${box('album')}</section>
+      <section>${head('Sellos al azar', 'label')}${box('label')}</section>
+      <section>${head('Géneros al azar', 'genre')}
+        <p class="big-links">${ext(RYM_GENRE_TREE, 'Árbol de géneros de RYM')} ${ext(RYM_CHARTS, 'Listado de charts de RYM')}</p>${box('genre')}</section>
+      <section>${head('Libros', 'book')}${box('book')}</section>
+      <section><h2>Por año</h2><div class="decades">${decades.join('')}</div></section>
+      <section>${head('Podcasts', 'podcast')}${box('podcast')}</section>
+      <section>${head('Artículos', 'outlet')}
+        ${grapa ? `<p class="big-links">${ext(grapa.base, 'Grapa, el fanzine de recortes')}</p>
+          <p class="small muted">${plural(grapa.articles, 'reseña, entrevista o artículo', 'reseñas, entrevistas y artículos')}
+          de ${plural(Object.keys(grapa.artists).length, 'artista', 'artistas')}.</p>` : '<p class="empty">Artículos y entrevistas: en preparación.</p>'}
+        ${box('outlet')}</section>
+    </div>
+    <footer class="home-foot">
+      ${n('artist')} artistas, ${n('album')} álbumes, ${n('song')} canciones, ${n('label')} sellos y ${n('genre')} géneros<br>
+      Fuente: ${n('facts')} notas de podcast, ${s.books.length} libros y ${n('lists')} listas.<br>
+      Datos de ${esc(String(s.built).slice(0, 10))}
+    </footer></div>`;
 }
+
+// ── Páginas «ver todo» (#/todos/<categoría>) ──
+
+const BROWSE = {
+  artistas: ['artist', 'Artistas'], discos: ['album', 'Discos'], sellos: ['label', 'Sellos'], generos: ['genre', 'Géneros'],
+};
+
+async function showAll(cat, query) {
+  const qs = new URLSearchParams(query || '');
+  if (BROWSE[cat]) return showBrowse(cat, qs.get('q') || '', Number(qs.get('p') || 1));
+  const A = new Article();
+  if (cat === 'libros') {
+    const s = await api('stats');
+    document.title = 'Libros — Encarta';
+    A.add(`<h1>Libros</h1><div class="tagline">${plural(s.books.length, 'libro', 'libros')}</div>`);
+    A.section('Libros', `<table class="wikitable"><tr><th>Libro</th><th>Autor</th><th class="num">Escenas</th>
+      <th class="num">Discos citados</th><th class="num">Menciones</th></tr>
+      ${s.books.map((b) => `<tr><td>${bookTitle(b)}</td><td>${esc(b.author)}</td>
+        <td class="num">${(b.scenes ?? '').toLocaleString('es')}</td><td class="num">${(b.tracks ?? '').toLocaleString('es')}</td>
+        <td class="num">${(b.mentions ?? '').toLocaleString('es')}</td></tr>`).join('')}</table>`);
+  } else if (cat === 'podcasts') {
+    const s = await api('stats');
+    const pods = (s.podcasts || []).slice().sort((x, y) => y.notes - x.notes);
+    document.title = 'Podcasts — Encarta';
+    A.add(`<h1>Podcasts</h1><div class="tagline">${plural(pods.length, 'podcast', 'podcasts')}</div>`);
+    A.section('Podcasts', `<table class="wikitable"><tr><th>Podcast</th><th class="num">Episodios</th><th class="num">Notas</th></tr>
+      ${pods.map((p) => `<tr><td>${p.url ? ext(p.url, p.name) : esc(p.name)}</td><td class="num">${p.episodes.toLocaleString('es')}</td>
+        <td class="num">${p.notes.toLocaleString('es')}</td></tr>`).join('')}</table>`);
+  } else if (cat === 'articulos') {
+    const [grapa, outlets] = await Promise.all([loadGrapa(), loadGrapaOutlets()]);
+    document.title = 'Artículos — Encarta';
+    A.add(`<h1>Artículos</h1><div class="tagline">Reseñas, entrevistas y artículos recogidos en Grapa</div>
+      <p class="big-links">${ext(GRAPA_URL, 'Grapa, el fanzine de recortes')}</p>`);
+    A.section('Fuentes', outlets && outlets.length ? `<table class="wikitable"><tr><th>Fuente</th><th class="num">Artículos</th><th class="num">Notas</th><th>Tipos</th></tr>
+      ${outlets.slice().sort((x, y) => (y.articulos || 0) - (x.articulos || 0)).map((o) => `<tr>
+        <td>${ext(o.pagina ? GRAPA_URL + o.pagina : o.url, o.nombre)}${o.dominio ? ` <span class="muted small">${esc(o.dominio)}</span>` : ''}</td>
+        <td class="num">${(o.articulos || 0).toLocaleString('es')}</td><td class="num">${(o.notas || 0).toLocaleString('es')}</td>
+        <td class="small">${Object.entries(o.tipos || {}).map(([k, v]) => `${esc(k)} ${v}`).join(' · ')}</td></tr>`).join('')}</table>`
+      : `<p class="empty">${grapa ? 'Grapa todavía no publica la lista de sus fuentes.' : 'Grapa todavía no está publicada.'}</p>`);
+  } else {
+    return showHome();
+  }
+  A.render();
+}
+
+async function showBrowse(cat, q, page) {
+  const [type, title] = BROWSE[cat];
+  const d = await api(`browse?type=${type}&q=${encodeURIComponent(q)}&page=${page}&per=100`);
+  document.title = `${title} — Encarta`;
+  const pages = Math.max(1, Math.ceil(d.total / d.per));
+  const nav = (p) => `#/todos/${cat}?${new URLSearchParams({ ...(q ? { q } : {}), p })}`;
+  const pager = `<div class="pager">${page > 1 ? `<a href="${nav(page - 1)}">← Anteriores</a>` : '<span></span>'}
+    <span class="muted small">Página ${page} de ${pages.toLocaleString('es')}</span>
+    ${page < pages ? `<a href="${nav(page + 1)}">Siguientes →</a>` : '<span></span>'}</div>`;
+  const A = new Article();
+  A.add(`<h1>${title}</h1><div class="tagline">${plural(d.total, 'entrada', 'entradas')}, de más a menos información</div>
+    <form class="filter browse-filter" data-cat="${cat}"><input type="search" name="q" value="${esc(q)}" placeholder="Filtrar ${title.toLowerCase()}…"></form>`);
+  A.add(d.items.length ? `${pager}${entityTable(d.items, type === 'album' ? ['name', 'artist', 'year'] : ['name', 'year'])}${pager}`
+    : '<p class="empty">Nada coincide con el filtro.</p>');
+  A.render();
+}
+
+document.addEventListener('submit', (ev) => {
+  const f = ev.target.closest('.browse-filter');
+  if (!f) return;
+  ev.preventDefault();
+  const q = f.q.value.trim();
+  go(`#/todos/${f.dataset.cat}${q ? '?' + new URLSearchParams({ q }) : ''}`);
+});
+
+document.addEventListener('click', async (ev) => {
+  const b = ev.target.closest('[data-sample]');
+  if (!b) return;
+  const box = $(`[data-sample-box="${b.dataset.sample}"]`);
+  b.disabled = true;
+  try { box.innerHTML = await sampleBlock(b.dataset.sample); } finally { b.disabled = false; }
+});
 
 async function fillImages() {
   for (const slot of $$('[data-img-for]', main)) {
@@ -701,16 +977,17 @@ async function fillImages() {
 }
 
 // ── Secciones plegables ──────────────────────────────────────────────────────
-// Se recuerdan por título las secciones que el usuario pliega (p. ej. siempre «Referencias»).
+// Por defecto solo la primera está abierta. Se recuerda por título lo que el usuario abre o pliega
+// ({título: 'open' | 'closed'}), p. ej. «Referencias» siempre abierta.
 
-function closedSections() {
-  try { return JSON.parse(localStorage.getItem('encarta.closed') || '[]'); } catch { return []; }
+function sectionState() {
+  try { return JSON.parse(localStorage.getItem('encarta.sec') || '{}'); } catch { return {}; }
 }
 function rememberSection(title, closed) {
   try {
-    const set = new Set(closedSections());
-    if (closed) set.add(title); else set.delete(title);
-    localStorage.setItem('encarta.closed', JSON.stringify([...set]));
+    const st = sectionState();
+    st[title] = closed ? 'closed' : 'open';
+    localStorage.setItem('encarta.sec', JSON.stringify(st));
   } catch { /* sin almacenamiento: solo dura esta página */ }
 }
 document.addEventListener('click', (ev) => {
@@ -732,25 +1009,190 @@ document.addEventListener('click', (ev) => {
   }
 });
 
+// Tablas: pulsar una cabecera ordena por esa columna; otra vez, al revés. Los números (año, puesto, refs…)
+// como números, «Fuentes» por cuántas cita y lo vacío siempre al final. Año, # y Puesto empiezan de menor a
+// mayor; las demás columnas numéricas, de mayor a menor.
+function sortKey(td) {
+  if (!td) return null;
+  const tags = td.querySelectorAll('.src-tag');
+  if (tags.length) return tags.length;
+  let t = td.textContent;
+  for (const b of td.querySelectorAll('button')) t = t.replace(b.textContent, '');
+  t = t.trim();
+  if (!t) return null;
+  const m = t.match(/^-?\d[\d.]*(,\d+)?/);
+  return m ? Number(m[0].replace(/\.(?=\d{3}\b)/g, '').replace(',', '.')) : t.toLocaleLowerCase('es');
+}
+document.addEventListener('click', (ev) => {
+  const th = ev.target.closest('table.wikitable th');
+  if (!th || ev.target.closest('a, button')) return;
+  const table = th.closest('table');
+  const head = th.parentElement;
+  const col = [...head.children].indexOf(th);
+  const rows = [...table.rows].filter((r) => r !== head);
+  const asc0 = !th.classList.contains('num') || /^(Año|#|Puesto)$/.test(th.textContent.trim());
+  const asc = th.dataset.sort ? th.dataset.sort === 'desc' : asc0;
+  for (const h of head.children) delete h.dataset.sort;
+  th.dataset.sort = asc ? 'asc' : 'desc';
+  const keyed = rows.map((r) => [sortKey(r.cells[col]), r]);
+  keyed.sort(([a], [b]) => {
+    if (a == null || b == null) return (a == null) - (b == null);
+    const d = typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b), 'es');
+    return asc ? d : -d;
+  });
+  const body = rows[0]?.parentElement;
+  for (const [, r] of keyed) body.append(r);
+});
+
 // ── Reproductor flotante ─────────────────────────────────────────────────────
 
 const player = $('#player');
-const frame = $('#player iframe');
+const plMsg = $('.pl-msg', player);
 let playingBtn = null;
+let yt = null;          // YT.Player, creado al primer ▶
+let ytReady = null;     // promesa de la API de YouTube (iframe_api)
+let current = null;     // { id, q, title, tries }
 
-function openPlayer(id, title, btn) {
+// La API de YouTube avisa cuando un vídeo no se puede reproducir (borrado, bloqueado en España, sin
+// inserción…: códigos 2, 5, 100, 101, 150, 153); entonces se busca otro con la misma consulta.
+function loadYT() {
+  ytReady ??= new Promise((resolve) => {
+    window.onYouTubeIframeAPIReady = resolve;
+    const s = document.createElement('script');
+    s.src = 'https://www.youtube.com/iframe_api';
+    document.head.append(s);
+  });
+  return ytReady;
+}
+
+async function openPlayer(id, title, btn) {
   if (playingBtn) playingBtn.classList.remove('playing');
   playingBtn = btn || null;
   if (playingBtn) playingBtn.classList.add('playing');
-  frame.src = `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&rel=0`;
-  $('.pl-title', player).textContent = title || '';
-  $('.pl-yt', player).href = `https://www.youtube.com/watch?v=${id}`;
+  current = { id, q: btn?.dataset.q || '', title, tries: 0 };
+  rememberPlayed(title);
   player.hidden = false;
   player.classList.remove('min');
+  showVideo(id, title);
+}
+
+async function showVideo(id, title) {
+  $('.pl-title', player).textContent = title || '';
+  mediaSession(title);
+  $('.pl-yt', player).href = `https://www.youtube.com/watch?v=${id}`;
+  plMsg.hidden = true;
+  await loadYT();
+  if (yt) return yt.loadVideoById(id);
+  yt = new YT.Player('pl-frame', {
+    host: 'https://www.youtube-nocookie.com',
+    videoId: id,
+    playerVars: { autoplay: 1, rel: 0, origin: location.origin },
+    events: { onError: playerError, onStateChange: (ev) => { syncSilence(ev.data); if (ev.data === YT.PlayerState.ENDED) playStep(1, true); } },
+  });
+}
+
+// Al terminar un vídeo (o con ⏭ / «n»), el siguiente ▶ no escuchado de la página; si ya no está en ella, el
+// primero no escuchado de la nueva. Al terminar (`auto`), si no queda ninguno se para; con ⏭ / «n», pasa al
+// siguiente aunque ya se haya escuchado. Con «p», el anterior, escuchado o no.
+function playStep(dir, auto = false) {
+  // En la versión estática los ▶ sin vídeo abren una búsqueda en otra pestaña: se saltan.
+  const btns = $$('button.play', main).filter((b) => !b.classList.contains('none') && !(STATIC && !b.dataset.yt));
+  const i = playingBtn ? btns.indexOf(playingBtn) : -1;
+  const fresh = btns.slice(i + 1).find((b) => !b.classList.contains('played'));
+  const to = dir < 0 ? (i < 0 ? null : btns[i - 1]) : fresh || (auto ? null : btns[i + 1]);
+  if (to) {
+    to.click();
+    to.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }
+}
+const playNext = () => playStep(1);
+
+function togglePause() {
+  if (!yt || !yt.getPlayerState) return;
+  if (yt.getPlayerState() === YT.PlayerState.PLAYING) yt.pauseVideo(); else yt.playVideo();
+}
+
+// Temas ya escuchados («Artista — Tema» → fecha), en este navegador: el ▶ lleva «✓» y el siguiente se los salta.
+const PLAYED_KEY = 'encarta.played';
+let played = {};
+try { played = JSON.parse(localStorage.getItem(PLAYED_KEY)) || {}; } catch {}
+const playedKey = (t) => norm(t || '');
+function markPlayed(root = main) {
+  for (const b of $$('button.play', root)) {
+    const when = played[playedKey(b.dataset.title)];
+    b.classList.toggle('played', !!when);
+    if (when) b.title = `Escuchar ${b.dataset.title} (escuchado el ${new Date(when).toLocaleDateString('es')})`;
+  }
+}
+function rememberPlayed(title) {
+  if (!title) return;
+  played[playedKey(title)] = Date.now();
+  try { localStorage.setItem(PLAYED_KEY, JSON.stringify(played)); } catch {}
+  markPlayed();
+}
+new MutationObserver(() => markPlayed()).observe(main, { childList: true, subtree: true });
+
+// Firefox/Zen dan el control multimedia al marco que suena; el vídeo está en el iframe de YouTube y Encarta
+// no suena, así que ⏮ ⏭ no le llegaban. Un silencio en bucle mientras suena el vídeo hace suya la sesión.
+const silence = new Audio(URL.createObjectURL(new Blob([(() => {
+  const n = 8000 * 8, b = new DataView(new ArrayBuffer(44 + n));
+  [[0, 'RIFF'], [8, 'WAVEfmt '], [36, 'data']].forEach(([o, s]) => [...s].forEach((c, i) => b.setUint8(o + i, c.charCodeAt(0))));
+  [[4, 36 + n, 4], [16, 16, 4], [20, 1, 2], [22, 1, 2], [24, 8000, 4], [28, 8000, 4], [32, 1, 2], [34, 8, 2], [40, n, 4]]
+    .forEach(([o, v, s]) => (s === 4 ? b.setUint32(o, v, true) : b.setUint16(o, v, true)));
+  for (let i = 44; i < 44 + n; i++) b.setUint8(i, 128);
+  return b.buffer;
+})()], { type: 'audio/wav' })));
+silence.loop = true;
+function syncSilence(state) {
+  if (!('mediaSession' in navigator)) return;
+  if (state === YT.PlayerState.PLAYING) { silence.play().catch(() => {}); navigator.mediaSession.playbackState = 'playing'; }
+  else if (state === YT.PlayerState.PAUSED) { silence.pause(); navigator.mediaSession.playbackState = 'paused'; }
+}
+
+// Control multimedia del navegador (widget de Zen/Firefox/Chrome, teclas multimedia, MPRIS): título del tema
+// y ⏮ ⏯ ⏭ aunque Encarta esté en otra pestaña.
+function mediaSession(title) {
+  if (!('mediaSession' in navigator)) return;
+  const t = title || '';
+  const cut = t.indexOf(' — ');
+  const img = (playingBtn?.closest('tr, li') || main).querySelector('img')?.src;
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: cut < 0 ? t : t.slice(cut + 3), artist: cut < 0 ? '' : t.slice(0, cut), album: 'Encarta',
+    artwork: img ? [{ src: img }] : [],
+  });
+}
+if ('mediaSession' in navigator) {
+  const ms = navigator.mediaSession;
+  ms.setActionHandler('nexttrack', () => playStep(1));
+  ms.setActionHandler('previoustrack', () => playStep(-1));
+  ms.setActionHandler('play', () => yt?.playVideo());
+  ms.setActionHandler('pause', () => yt?.pauseVideo());
+}
+
+async function playerError() {
+  const c = current;
+  if (!c) return;
+  const search = `https://www.youtube.com/results?search_query=${encodeURIComponent(c.q || c.title || '')}`;
+  const fail = () => {
+    plMsg.innerHTML = `YouTube no deja reproducir este vídeo. <a href="${esc(search)}" target="_blank" rel="noopener">Buscarlo en YouTube</a>`;
+    plMsg.hidden = false;
+  };
+  if (STATIC || !c.q || c.tries >= 3) return fail();
+  c.tries += 1;
+  plMsg.textContent = 'Vídeo no disponible; buscando otro…';
+  plMsg.hidden = false;
+  let r = {};
+  try { r = await getJson(`/api/yt?q=${encodeURIComponent(c.q)}&bad=${encodeURIComponent(c.id)}`); } catch { /* sin conexión */ }
+  if (current !== c) return;  // ya se pulsó otro
+  if (!r.id) return fail();
+  c.id = r.id;
+  if (playingBtn) playingBtn.dataset.yt = r.id;
+  showVideo(r.id, c.title);
 }
 
 function closePlayer() {
-  frame.src = 'about:blank';
+  if (yt) yt.stopVideo();
+  current = null;
   player.hidden = true;
   if (playingBtn) playingBtn.classList.remove('playing');
   playingBtn = null;
@@ -780,6 +1222,22 @@ document.addEventListener('click', async (ev) => {
   openPlayer(b.dataset.yt, b.dataset.title, b);
 });
 $('.pl-close', player).addEventListener('click', closePlayer);
+
+// Tema: claro (PsychonautWiki) o noche; el <head> de index.html lo aplica antes de pintar.
+const themeBtn = $('#theme');
+function showTheme() {
+  const dark = document.documentElement.dataset.theme === 'dark';
+  themeBtn.textContent = dark ? '☀' : '☾';
+  themeBtn.title = dark ? 'Modo claro' : 'Modo noche';
+}
+themeBtn.addEventListener('click', () => {
+  const dark = document.documentElement.dataset.theme !== 'dark';
+  if (dark) document.documentElement.dataset.theme = 'dark'; else delete document.documentElement.dataset.theme;
+  try { localStorage.setItem('encarta.theme', dark ? 'dark' : ''); } catch { /* sin almacenamiento */ }
+  showTheme();
+});
+showTheme();
+$('.pl-next', player).addEventListener('click', playNext);
 $('.pl-min', player).addEventListener('click', () => player.classList.toggle('min'));
 
 // ── Navegación ───────────────────────────────────────────────────────────────
@@ -804,6 +1262,7 @@ async function route() {
     else if (p[0] === 'e') await showEntity(p[1]);
     else if (p[0] === 'year') await showYear(Number(p[1]));
     else if (p[0] === 'lista') await showList(p[1]);
+    else if (p[0] === 'todos') await showAll(p[1], query);
     else if (p[0] === 'buscar') {
       const qs = new URLSearchParams(query);
       $('#q').value = qs.get('q') || '';
@@ -901,11 +1360,20 @@ $('#search').addEventListener('submit', (ev) => {
   if (/^\d{4}$/.test(q)) return go(`#/year/${q}`);
   go(`#/buscar?q=${encodeURIComponent(q)}&t=${t}`);
 });
+// Atajos: «/» buscar; «n» siguiente ▶, «p» anterior y espacio pausa (no mientras se escribe).
 document.addEventListener('keydown', (ev) => {
-  if (ev.key === '/' && document.activeElement !== qInput && !/input|select|textarea/i.test(document.activeElement.tagName)) {
+  if (ev.ctrlKey || ev.metaKey || ev.altKey || /input|select|textarea/i.test(document.activeElement.tagName)) return;
+  if (ev.key === '/') {
     ev.preventDefault();
     qInput.focus();
     qInput.select();
+  } else if (ev.key === 'n') {
+    playStep(1);
+  } else if (ev.key === 'p') {
+    playStep(-1);
+  } else if (ev.key === ' ' && !player.hidden) {
+    ev.preventDefault();
+    togglePause();
   }
 });
 

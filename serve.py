@@ -7,9 +7,12 @@ serve.py — sirve la web (web/) y la API JSON sobre encarta.db.
   GET /api/year/<año>                                           todo lo de ese año
   GET /api/list/<id>                                            una lista / chart
   GET /api/random?type=…                                        una entrada al azar
+  GET /api/sample?type=…&n=…                                    varias entradas al azar (portada)
+  GET /api/browse?type=…&q=…&page=…                            listado completo de un tipo (páginas «ver todo»)
   GET /api/stats                                                cifras de portada
   GET /api/img/<id>                                             foto o portada (Deezer si falta; cacheada)
-  GET /api/yt?q=…                                               vídeo de YouTube para una búsqueda (yt-dlp; cacheado)
+  GET /api/yt?q=…[&bad=id]                                      vídeo de YouTube para una búsqueda (yt-dlp; cacheado);
+                                                                bad: id que no se reproduce, se descarta
 
 Uso: python3 -I serve.py [--port 8765] [--host 127.0.0.1]
 """
@@ -62,8 +65,83 @@ def cache_db():
     con = sqlite3.connect(CACHE, timeout=10)
     con.executescript('''
         CREATE TABLE IF NOT EXISTS img (key TEXT PRIMARY KEY, url TEXT, at INTEGER);
-        CREATE TABLE IF NOT EXISTS yt (q TEXT PRIMARY KEY, id TEXT, title TEXT, at INTEGER);''')
+        CREATE TABLE IF NOT EXISTS yt (q TEXT PRIMARY KEY, id TEXT, title TEXT, at INTEGER);
+        CREATE TABLE IF NOT EXISTS yt_bad (id TEXT PRIMARY KEY, at INTEGER);
+        CREATE TABLE IF NOT EXISTS yt_swap (bad TEXT PRIMARY KEY, good TEXT, at INTEGER);''')
     return con
+
+
+def yt_swaps(*paths):
+    """{id que no se reproduce: el que lo sustituye, o None si no se encontró otro} de una o varias cachés.
+    Las sustituciones encadenadas (a→b y luego b→c) se resuelven hasta el final."""
+    bad, swap = set(), {}
+    for path in paths or (CACHE,):
+        if not os.path.exists(path):
+            continue
+        con = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
+        try:
+            bad |= {r[0] for r in con.execute('SELECT id FROM yt_bad')}
+            swap.update(con.execute('SELECT bad, good FROM yt_swap'))
+        except sqlite3.OperationalError:  # caché de antes de existir estas tablas
+            pass
+        con.close()
+    out = {}
+    for b in bad:
+        g, seen = swap.get(b), {b}
+        while g in swap and g not in seen:
+            seen.add(g)
+            g = swap[g]
+        out[b] = None if g in bad else g
+    return out
+
+
+def fix_yt(data, swaps):
+    """Cambia en una respuesta los vídeos que no se reproducen por su sustituto (o los quita)."""
+    if not swaps:
+        return data
+    if isinstance(data, list):
+        for x in data:
+            fix_yt(x, swaps)
+    elif isinstance(data, dict):
+        for k, v in data.items():
+            if k == 'yt' and isinstance(v, str):
+                data[k] = swaps.get(v, v)
+            elif isinstance(v, (dict, list)):
+                fix_yt(v, swaps)
+    return data
+
+
+_OHW = (None, frozenset())
+
+
+def ohw_ids():
+    """Ids de los one-hit wonders (tabla `ohw` de build.py), leídos de nuevo cuando cambia encarta.db."""
+    global _OHW
+    mtime = os.path.getmtime(DB) if os.path.exists(DB) else None
+    if _OHW[0] != mtime:
+        con = connect()
+        try:
+            ids = frozenset(r[0] for r in con.execute('SELECT id FROM ohw'))
+        except sqlite3.OperationalError:  # base de antes de existir la tabla
+            ids = frozenset()
+        con.close()
+        _OHW = (mtime, ids)
+    return _OHW[1]
+
+
+def mark_ohw(data, ids=None):
+    """Pone `ohw: true` a los artistas one-hit wonder de una respuesta (la web les añade un «₁»)."""
+    ids = ohw_ids() if ids is None else ids
+    if isinstance(data, list):
+        for x in data:
+            mark_ohw(x, ids)
+    elif isinstance(data, dict):
+        if data.get('type') == 'artist' and data.get('id') in ids:
+            data['ohw'] = True
+        for v in data.values():
+            if isinstance(v, (dict, list)):
+                mark_ohw(v, ids)
+    return data
 
 
 def rows(cur):
@@ -506,8 +584,10 @@ def year_detail(con, y):
                                 WHERE type IN ('album','work') AND year = ? ORDER BY weight DESC LIMIT 120''', (y,))),
         'songs': with_sources(con, brief(con, f'''SELECT id, type, name, artist, year, weight, {YT} FROM entity e
                                WHERE type = 'song' AND year = ? ORDER BY weight DESC LIMIT 120''', (y,))),
-        'artists': brief(con, '''SELECT id, type, name, year, weight FROM entity
-                                 WHERE type = 'artist' AND year = ? ORDER BY weight DESC LIMIT 80''', (y,)),
+        # end: año en que se separan o mueren (para la línea de tiempo de la página del año)
+        'artists': brief(con, '''SELECT id, type, name, year, weight,
+                                        CAST(substr(json_extract(info, '$.end'), 1, 4) AS INTEGER) AS end
+                                 FROM entity WHERE type = 'artist' AND year = ? ORDER BY weight DESC LIMIT 80''', (y,)),
         'scenes': scenes,
         'charts': list(charts.values()),
         'book_tracks': book_tracks(con, 't.year = ? AND t.ess = 1', (y,)),
@@ -602,33 +682,76 @@ def entity_img(con, eid):
     return {'img': url}
 
 
-def youtube(q):
+def youtube(q, bad=''):
+    """Primer vídeo de YouTube para la búsqueda q que no esté en yt_bad. El reproductor manda en `bad` el id
+    que YouTube no deja reproducir (borrado, bloqueado en España o sin inserción) y se busca el siguiente."""
     q = ' '.join(q.split())[:200]
     if not q:
         return {}
     with cache_db() as c:
+        if re.fullmatch(r'[\w-]{11}', bad):
+            c.execute('INSERT OR REPLACE INTO yt_bad VALUES (?,?)', (bad, int(time.time())))
+        bads = {r[0] for r in c.execute('SELECT id FROM yt_bad')}
         r = c.execute('SELECT id, title, at FROM yt WHERE q = ?', (q.lower(),)).fetchone()
-        if r and (r[0] or time.time() - r[2] < RETRY):
+        if r and r[0] not in bads and (r[0] or time.time() - r[2] < RETRY):
+            if bad and r[0]:
+                c.execute('INSERT OR REPLACE INTO yt_swap VALUES (?,?,?)', (bad, r[0], int(time.time())))
             return {'id': r[0], 'title': r[1]}
     vid = title = None
     try:
         out = subprocess.run(['yt-dlp', '--no-warnings', '--flat-playlist', '--print', '%(id)s\t%(title)s',
-                              f'ytsearch1:{q}'], capture_output=True, text=True, timeout=25).stdout.strip()
-        if '\t' in out:
-            vid, title = out.splitlines()[0].split('\t', 1)
+                              f'ytsearch{6 if bads else 1}:{q}'], capture_output=True, text=True, timeout=25).stdout
+        for line in out.splitlines():
+            i, _, t = line.partition('\t')
+            if t and i not in bads:
+                vid, title = i, t
+                break
     except (OSError, subprocess.TimeoutExpired):
         return {}
     with cache_db() as c:
         c.execute('INSERT OR REPLACE INTO yt VALUES (?,?,?,?)', (q.lower(), vid, title, int(time.time())))
+        if bad and vid:
+            c.execute('INSERT OR REPLACE INTO yt_swap VALUES (?,?,?)', (bad, vid, int(time.time())))
     return {'id': vid, 'title': title}
+
+
+def sample(con, type_, n):
+    """Entradas al azar de un tipo, entre las que tienen bastante información."""
+    types = TYPE_FILTER.get(type_) or ('artist',)
+    ph = ','.join('?' * len(types))
+    return brief(con, f'''SELECT id, type, name, artist, year FROM entity
+                          WHERE type IN ({ph}) AND weight >= 25 AND LENGTH(name) <= 60
+                          ORDER BY RANDOM() LIMIT ?''', (*types, n))
+
+
+def browse(con, type_, q='', page=1, per=100):
+    """Listado completo de un tipo, de más a menos información, filtrable y por páginas."""
+    types = TYPE_FILTER.get(type_) or ('artist',)
+    where = f"type IN ({','.join('?' * len(types))})"
+    args = list(types)
+    q = norm(q)
+    if q:
+        where += " AND search LIKE '%' || ? || '%'"
+        args.append(q)
+    total = con.execute(f'SELECT COUNT(*) FROM entity WHERE {where}', args).fetchone()[0]
+    items = brief(con, f'''SELECT id, type, name, artist, year, weight FROM entity WHERE {where}
+                           ORDER BY weight DESC, name LIMIT ? OFFSET ?''', (*args, per, (page - 1) * per))
+    return {'total': total, 'page': page, 'per': per, 'items': items}
 
 
 def stats(con):
     d = {t: n for t, n in con.execute('SELECT type, COUNT(*) FROM entity GROUP BY type')}
     d['facts'] = con.execute("SELECT COUNT(*) FROM fact WHERE kind IN ('podcast','curiosity')").fetchone()[0]
-    d['books'] = rows(con.execute('SELECT id, title, author, url FROM mb_book ORDER BY title'))
+    d['books'] = rows(con.execute('''
+        SELECT b.id, b.title, b.author, b.url,
+               (SELECT COUNT(*) FROM mb_scene s WHERE s.book = b.id) AS scenes,
+               (SELECT COUNT(*) FROM mb_track t WHERE t.book = b.id) AS tracks,
+               (SELECT COUNT(*) FROM mb_mention m WHERE m.book = b.id) AS mentions
+        FROM mb_book b ORDER BY b.title'''))
     d['lists'] = con.execute('SELECT COUNT(*) FROM list').fetchone()[0]
     d['built'] = con.execute("SELECT v FROM meta WHERE k = 'built'").fetchone()[0]
+    r = con.execute("SELECT v FROM meta WHERE k = 'podcasts'").fetchone()
+    d['podcasts'] = json.loads(r[0]) if r else []
     d['top'] = {t: brief(con, 'SELECT id, type, name, artist FROM entity WHERE type = ? ORDER BY weight DESC LIMIT 12',
                          (t,)) for t in ('artist', 'album', 'genre', 'label')}
     return d
@@ -666,11 +789,16 @@ class Handler(SimpleHTTPRequestHandler):
             if parts == ['search']:
                 data = search(con, qs.get('q', ''), qs.get('type', 'all'), min(int(qs.get('limit', 60)), 300))
             elif parts[0] == 'entity' and len(parts) == 2 and parts[1].isdigit():
-                data = entity_detail(con, int(parts[1]))
+                data = fix_yt(entity_detail(con, int(parts[1])), yt_swaps())
             elif parts[0] == 'year' and len(parts) == 2 and parts[1].isdigit():
-                data = year_detail(con, int(parts[1]))
+                data = fix_yt(year_detail(con, int(parts[1])), yt_swaps())
             elif parts[0] == 'list' and len(parts) == 2 and parts[1].isdigit():
-                data = list_detail(con, int(parts[1]))
+                data = fix_yt(list_detail(con, int(parts[1])), yt_swaps())
+            elif parts == ['browse']:
+                data = browse(con, qs.get('type', 'artist'), qs.get('q', ''),
+                              max(int(qs.get('page', 1)), 1), min(int(qs.get('per', 100)), 500))
+            elif parts == ['sample']:
+                data = sample(con, qs.get('type', 'artist'), min(int(qs.get('n', 12)), 50))
             elif parts == ['random']:
                 data = random_entity(con, qs.get('type', 'all'))
             elif parts == ['stats']:
@@ -678,12 +806,12 @@ class Handler(SimpleHTTPRequestHandler):
             elif parts[0] == 'img' and len(parts) == 2 and parts[1].isdigit():
                 data = entity_img(con, int(parts[1]))
             elif parts == ['yt']:
-                data = youtube(qs.get('q', ''))
+                data = youtube(qs.get('q', ''), qs.get('bad', ''))
             else:
                 return self.send_json({'error': 'ruta desconocida'}, 404)
             if data is None:
                 return self.send_json({'error': 'no encontrado'}, 404)
-            self.send_json(data)
+            self.send_json(mark_ohw(data))
         finally:
             con.close()
 

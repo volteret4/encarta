@@ -61,7 +61,10 @@ function link(e, label) {
 // Enlace a una lista; en la versión estática solo si se exportó.
 function listLink(id, html, cls = '', title = '') {
   const attrs = `${cls ? ` class="${cls}"` : ''}${title ? ` title="${title}"` : ''}`;
-  if (STATIC && !STATIC.lists.has(id)) return `<span${attrs}>${html}</span>`;
+  if (STATIC && !STATIC.lists.has(id)) {
+    const slug = STATIC.rym[id];  // «RYM Top»: su página en la web de must hear
+    return slug ? `<a${attrs} href="${RYM_CHARTS}${slug}/index.html" target="_blank" rel="noopener">${html}</a>` : `<span${attrs}>${html}</span>`;
+  }
   return `<a${attrs} href="#/lista/${id}">${html}</a>`;
 }
 const yearLink = (y) => (y ? `<a href="#/year/${y}">${y}</a>` : '');
@@ -82,6 +85,52 @@ async function getJson(url) {
   return r.json();
 }
 
+// ── Grapa (fanzine de artículos: repo ../Music_articles, publicado en su propio GitHub Pages) ──
+// Todas las versiones de Encarta (local, pepecono, estática) leen su índice publicado: GitHub Pages
+// permite pedirlo desde otro dominio. Si no responde, las fichas salen sin la sección.
+const GRAPA_URL = 'https://volteret4.github.io/grapa/';
+let grapaIndex = null;
+function loadGrapa() {
+  if (!grapaIndex) {
+    grapaIndex = fetch(GRAPA_URL + 'data/artistas.json')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => (d ? { base: GRAPA_URL, ...d } : null))
+      .catch(() => null);
+  }
+  return grapaIndex;
+}
+let grapaOutlets = null;
+// Fuentes (cabeceras) de Grapa con sus cifras: [{nombre, dominio, url, pagina, articulos, notas, tipos}].
+function loadGrapaOutlets() {
+  if (!grapaOutlets) {
+    grapaOutlets = fetch(GRAPA_URL + 'data/cabeceras.json')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => (d && Array.isArray(d.cabeceras) ? d.cabeceras : null))
+      .catch(() => null);
+  }
+  return grapaOutlets;
+}
+let GRAPA = null;  // índice ya cargado: { base, articles, artists: {id: {tipo: n}}, albums: {id: [artista, n]} }
+
+const GRAPA_KINDS = [['reseña', 'reseña', 'reseñas'], ['entrevista', 'entrevista', 'entrevistas'],
+  ['artículo', 'artículo', 'artículos'], ['noticia', 'noticia', 'noticias']];
+function grapaSection(A, e) {
+  if (!GRAPA) return;
+  if (e.type === 'artist') {
+    const k = GRAPA.artists[e.id];
+    if (!k) return;
+    const n = Object.values(k).reduce((a, b) => a + b, 0);
+    const parts = GRAPA_KINDS.filter(([key]) => k[key]).map(([key, one, many]) => plural(k[key], one, many));
+    A.section('En la prensa', `<p>${parts.join(', ')} sobre ${esc(e.name)} en
+      <a class="ext" href="${esc(GRAPA.base)}artista/${e.id}.html" target="_blank" rel="noopener">Grapa</a>, el fanzine de recortes.</p>`, n);
+  } else {
+    const a = GRAPA.albums[e.id];
+    if (!a) return;
+    A.section('En la prensa', `<p>${plural(a[1], 'reseña o artículo', 'reseñas y artículos')} sobre este disco en
+      <a class="ext" href="${esc(GRAPA.base)}artista/${a[0]}.html#d${e.id}" target="_blank" rel="noopener">Grapa</a>.</p>`, a[1]);
+  }
+}
+
 // ── Versión estática (GitHub Pages) ──────────────────────────────────────────
 // build_static.py exporta las fichas a data/*.json y pone window.ENCARTA_STATIC = true en
 // index.html. Sin servidor: la búsqueda va sobre data/index.json en el navegador, las fotos
@@ -95,6 +144,7 @@ async function loadStatic() {
   STATIC = {
     rows: rows.map(([id, type, name, artist, year, weight]) => ({ id, type, name, artist, year, weight, s: snorm(`${name} ${artist || ''}`), n: snorm(name) })),
     lists: new Set(stats.lists_exported),
+    rym: stats.rym_slugs || {},
     threshold: stats.threshold,
   };
   STATIC.ids = new Set(STATIC.rows.map((r) => r.id));
@@ -120,6 +170,23 @@ async function staticApi(path) {
     const hits = STATIC.rows.filter((r) => q && r.s.includes(q) && (!types || types.includes(r.type)));
     hits.sort((a, b) => (b.n === q) - (a.n === q) || b.n.startsWith(q) - a.n.startsWith(q) || b.weight - a.weight);
     return { q, results: hits.slice(0, limit) };
+  }
+  if (kind === 'browse') {
+    const types = TYPE_FILTER[qs.get('type')] || ['artist'];
+    const q = snorm(qs.get('q'));
+    const per = Number(qs.get('per') || 100);
+    const page = Number(qs.get('page') || 1);
+    const hits = STATIC.rows.filter((r) => types.includes(r.type) && (!q || r.s.includes(q)));
+    return { total: hits.length, page, per, items: hits.slice((page - 1) * per, page * per) };
+  }
+  if (kind === 'sample') {
+    const types = TYPE_FILTER[qs.get('type')] || ['artist'];
+    const pool = STATIC.rows.filter((r) => r.weight >= 25 && r.name.length <= 60 && types.includes(r.type));
+    const out = [];
+    for (let i = 0; i < Number(qs.get('n') || 12) && pool.length; i++) {
+      out.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+    }
+    return out;
   }
   if (kind === 'random') {
     const types = TYPE_FILTER[qs.get('type')];
@@ -493,6 +560,7 @@ function renderArtist(e) {
   const named = e.concerts.filter((c) => !c.body && !told.some((t) => t.title === c.title));
   A.section('Conciertos', factList(told, A, 'f-concerts') + (named.length ? `${told.length ? '<h3>Otros conciertos</h3>' : ''}${inline(named, (c) => esc(c.title))}` : ''),
     told.length + named.length);
+  grapaSection(A, e);
   if (e.xref.length) {
     A.section('Mencionado en otras fichas', `<p class="small muted">Notas de podcast sobre otros artistas que también hablan de ${esc(e.name)}.</p>
       <details class="more"><summary>Ver ${e.xref.length} notas</summary>${factList(e.xref, A, 'f-xref')}</details>`, e.xref.length);
@@ -545,6 +613,7 @@ function renderWork(e) {
   A.section('En los libros', bookTracks(e.book_tracks), nBooks);
   A.section('En los podcasts', factList(e.podcast, A, 'f-podcast'), e.podcast.length);
   A.section('En listas y charts', listsTable(e.lists), e.lists.length);
+  grapaSection(A, e);
   A.section(`Más de ${e.artist || 'este artista'}`, e.others.length ? inline(e.others, (o) => `${link(o)} <span class="muted small">${o.year || ''}</span>`) : '');
   A.render();
 }
@@ -601,7 +670,8 @@ function renderGenre(e) {
 }
 
 async function showEntity(id) {
-  const e = await api('entity/' + id);
+  const [e, g] = await Promise.all([api('entity/' + id), loadGrapa()]);
+  GRAPA = g;
   document.title = `${e.name} — Encarta`;
   if (e.type === 'artist') return renderArtist(e);
   if (e.type === 'label') return renderLabel(e);
@@ -664,30 +734,153 @@ async function showSearch(q, t) {
   A.render();
 }
 
+// Páginas de rym_lastfm publicadas en volteret4.github.io.
+const RYM_GENRE_TREE = 'https://volteret4.github.io/must_hear/rym_genre_tree.html';
+const RYM_CHARTS = 'https://volteret4.github.io/must_hear/rym_charts/';
+
+// Recuadros de la portada: los de fichas se piden al servidor al azar; libros, podcasts y fuentes de
+// Grapa se barajan en el navegador. Cada uno con «↻» (otros al azar) y «→» (página con todo).
+const SAMPLE = { artist: 14, album: 12, label: 14, genre: 16, book: 10, podcast: 15, outlet: 15 };
+const HOME = { book: [], podcast: [], outlet: [] };
+const ALL = { artist: 'artistas', album: 'discos', label: 'sellos', genre: 'generos', book: 'libros', podcast: 'podcasts', outlet: 'articulos' };
+
+function pick(arr, n) {
+  const pool = arr.slice();
+  const out = [];
+  while (out.length < n && pool.length) out.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+  return out;
+}
+
+const bookItem = (b) => `<li><i>${esc(b.title)}</i> <span class="muted">— ${esc(b.author)}</span>${b.url ? ' ' + ext(b.url, '') : ''}</li>`;
+const podcastItem = (p) => `<li>${p.url ? ext(p.url, p.name) : esc(p.name)} <span class="muted small">${plural(p.episodes, 'episodio', 'episodios')}</span></li>`;
+const outletItem = (o) => `<li>${ext(o.pagina ? GRAPA_URL + o.pagina : o.url, o.nombre)} <span class="muted small">${plural(o.articulos || 0, 'artículo', 'artículos')}</span></li>`;
+
+async function sampleBlock(type) {
+  if (type === 'book') return `<ul class="plain">${pick(HOME.book, SAMPLE.book).map(bookItem).join('')}</ul>`;
+  if (type === 'podcast') return `<ul class="plain">${pick(HOME.podcast, SAMPLE.podcast).map(podcastItem).join('')}</ul>`;
+  if (type === 'outlet') return HOME.outlet.length ? `<ul class="plain">${pick(HOME.outlet, SAMPLE.outlet).map(outletItem).join('')}</ul>` : '';
+  const items = await api(`sample?type=${type}&n=${SAMPLE[type]}&_=${Date.now()}`);
+  return type === 'album' ? inline(items, (x) => `${link(x)}${artistOf(x)}`) : inline(items);
+}
+
 async function showHome() {
   document.title = 'Encarta';
-  const s = await api('stats');
   toc.innerHTML = '';
+  const [s, grapa, outlets] = await Promise.all([api('stats'), loadGrapa(), loadGrapaOutlets()]);
+  HOME.book = s.books;
+  HOME.podcast = s.podcasts || [];
+  HOME.outlet = outlets || [];
+  const types = ['artist', 'album', 'label', 'genre', 'book', 'podcast', 'outlet'];
+  const blocks = Object.fromEntries(types.map((t, i) => [t, i]));
+  const html = await Promise.all(types.map(sampleBlock));
+  const box = (t) => `<div data-sample-box="${t}">${html[blocks[t]]}</div>`;
+  const head = (title, t) => `<h2>${title}
+    <button type="button" class="reshuffle" data-sample="${t}" title="Otros al azar">↻</button>
+    <a class="see-all" href="#/todos/${ALL[t]}" title="Ver la lista completa">→</a></h2>`;
   const n = (k) => (s[k] || 0).toLocaleString('es');
   const decades = [];
   for (let d = 1920; d <= 2020; d += 10) {
-    decades.push(`<div><b>${d}s</b><div class="years">${Array.from({ length: 10 }, (_, i) => d + i).filter((y) => y <= 2026).map(yearLink).join(' ')}</div></div>`);
+    decades.push(`<details class="decade"><summary>${d}s</summary><div class="years">${Array.from({ length: 10 }, (_, i) => d + i).filter((y) => y <= 2026).map(yearLink).join(' ')}</div></details>`);
   }
   main.innerHTML = `<div class="home">
-    <h1>Encarta</h1>
-    <p class="welcome">${n('artist')} artistas, ${n('album')} álbumes, ${n('song')} canciones,
-      ${n('label')} sellos y ${n('genre')} géneros, con ${n('facts')} notas de podcast, ${s.books.length} libros y ${n('lists')} listas.
-      <br><span class="muted small">Datos de ${esc(s.built)} · <a href="#/azar">Abrir una entrada al azar</a></span>
-</p>
     <div class="portal">
-      <section><h2>Artistas destacados</h2>${inline(s.top.artist)}</section>
-      <section><h2>Discos destacados</h2>${inline(s.top.album, (x) => `${link(x)}${artistOf(x)}`)}</section>
-      <section><h2>Géneros</h2>${inline(s.top.genre)}</section>
-      <section><h2>Sellos</h2>${inline(s.top.label)}</section>
-      <section><h2>Libros</h2><ul class="plain">${s.books.map((b) => `<li><i>${esc(b.title)}</i> <span class="muted">— ${esc(b.author)}</span> ${b.url ? ext(b.url, 'web') : ''}</li>`).join('')}</ul></section>
-      <section><h2>Por año</h2>${decades.join('')}</section>
-    </div></div>`;
+      <section>${head('Artistas al azar', 'artist')}${box('artist')}</section>
+      <section>${head('Discos al azar', 'album')}${box('album')}</section>
+      <section>${head('Sellos al azar', 'label')}${box('label')}</section>
+      <section>${head('Géneros al azar', 'genre')}
+        <p class="big-links">${ext(RYM_GENRE_TREE, 'Árbol de géneros de RYM')} ${ext(RYM_CHARTS, 'Listado de charts de RYM')}</p>${box('genre')}</section>
+      <section>${head('Libros', 'book')}${box('book')}</section>
+      <section><h2>Por año</h2><div class="decades">${decades.join('')}</div></section>
+      <section>${head('Podcasts', 'podcast')}${box('podcast')}</section>
+      <section>${head('Artículos', 'outlet')}
+        ${grapa ? `<p class="big-links">${ext(grapa.base, 'Grapa, el fanzine de recortes')}</p>
+          <p class="small muted">${plural(grapa.articles, 'reseña, entrevista o artículo', 'reseñas, entrevistas y artículos')}
+          de ${plural(Object.keys(grapa.artists).length, 'artista', 'artistas')}.</p>` : '<p class="empty">Artículos y entrevistas: en preparación.</p>'}
+        ${box('outlet')}</section>
+    </div>
+    <footer class="home-foot">
+      ${n('artist')} artistas, ${n('album')} álbumes, ${n('song')} canciones, ${n('label')} sellos y ${n('genre')} géneros<br>
+      Fuente: ${n('facts')} notas de podcast, ${s.books.length} libros y ${n('lists')} listas.<br>
+      Datos de ${esc(String(s.built).slice(0, 10))}
+    </footer></div>`;
 }
+
+// ── Páginas «ver todo» (#/todos/<categoría>) ──
+
+const BROWSE = {
+  artistas: ['artist', 'Artistas'], discos: ['album', 'Discos'], sellos: ['label', 'Sellos'], generos: ['genre', 'Géneros'],
+};
+
+async function showAll(cat, query) {
+  const qs = new URLSearchParams(query || '');
+  if (BROWSE[cat]) return showBrowse(cat, qs.get('q') || '', Number(qs.get('p') || 1));
+  const A = new Article();
+  if (cat === 'libros') {
+    const s = await api('stats');
+    document.title = 'Libros — Encarta';
+    A.add(`<h1>Libros</h1><div class="tagline">${plural(s.books.length, 'libro', 'libros')}</div>`);
+    A.section('Libros', `<table class="wikitable"><tr><th>Libro</th><th>Autor</th><th class="num">Escenas</th>
+      <th class="num">Discos citados</th><th class="num">Menciones</th></tr>
+      ${s.books.map((b) => `<tr><td><i>${esc(b.title)}</i>${b.url ? ' ' + ext(b.url, '') : ''}</td><td>${esc(b.author)}</td>
+        <td class="num">${(b.scenes ?? '').toLocaleString('es')}</td><td class="num">${(b.tracks ?? '').toLocaleString('es')}</td>
+        <td class="num">${(b.mentions ?? '').toLocaleString('es')}</td></tr>`).join('')}</table>`);
+  } else if (cat === 'podcasts') {
+    const s = await api('stats');
+    const pods = (s.podcasts || []).slice().sort((x, y) => y.notes - x.notes);
+    document.title = 'Podcasts — Encarta';
+    A.add(`<h1>Podcasts</h1><div class="tagline">${plural(pods.length, 'podcast', 'podcasts')}</div>`);
+    A.section('Podcasts', `<table class="wikitable"><tr><th>Podcast</th><th class="num">Episodios</th><th class="num">Notas</th></tr>
+      ${pods.map((p) => `<tr><td>${p.url ? ext(p.url, p.name) : esc(p.name)}</td><td class="num">${p.episodes.toLocaleString('es')}</td>
+        <td class="num">${p.notes.toLocaleString('es')}</td></tr>`).join('')}</table>`);
+  } else if (cat === 'articulos') {
+    const [grapa, outlets] = await Promise.all([loadGrapa(), loadGrapaOutlets()]);
+    document.title = 'Artículos — Encarta';
+    A.add(`<h1>Artículos</h1><div class="tagline">Reseñas, entrevistas y artículos recogidos en Grapa</div>
+      <p class="big-links">${ext(GRAPA_URL, 'Grapa, el fanzine de recortes')}</p>`);
+    A.section('Fuentes', outlets && outlets.length ? `<table class="wikitable"><tr><th>Fuente</th><th class="num">Artículos</th><th class="num">Notas</th><th>Tipos</th></tr>
+      ${outlets.slice().sort((x, y) => (y.articulos || 0) - (x.articulos || 0)).map((o) => `<tr>
+        <td>${ext(o.pagina ? GRAPA_URL + o.pagina : o.url, o.nombre)}${o.dominio ? ` <span class="muted small">${esc(o.dominio)}</span>` : ''}</td>
+        <td class="num">${(o.articulos || 0).toLocaleString('es')}</td><td class="num">${(o.notas || 0).toLocaleString('es')}</td>
+        <td class="small">${Object.entries(o.tipos || {}).map(([k, v]) => `${esc(k)} ${v}`).join(' · ')}</td></tr>`).join('')}</table>`
+      : `<p class="empty">${grapa ? 'Grapa todavía no publica la lista de sus fuentes.' : 'Grapa todavía no está publicada.'}</p>`);
+  } else {
+    return showHome();
+  }
+  A.render();
+}
+
+async function showBrowse(cat, q, page) {
+  const [type, title] = BROWSE[cat];
+  const d = await api(`browse?type=${type}&q=${encodeURIComponent(q)}&page=${page}&per=100`);
+  document.title = `${title} — Encarta`;
+  const pages = Math.max(1, Math.ceil(d.total / d.per));
+  const nav = (p) => `#/todos/${cat}?${new URLSearchParams({ ...(q ? { q } : {}), p })}`;
+  const pager = `<div class="pager">${page > 1 ? `<a href="${nav(page - 1)}">← Anteriores</a>` : '<span></span>'}
+    <span class="muted small">Página ${page} de ${pages.toLocaleString('es')}</span>
+    ${page < pages ? `<a href="${nav(page + 1)}">Siguientes →</a>` : '<span></span>'}</div>`;
+  const A = new Article();
+  A.add(`<h1>${title}</h1><div class="tagline">${plural(d.total, 'entrada', 'entradas')}, de más a menos información</div>
+    <form class="filter browse-filter" data-cat="${cat}"><input type="search" name="q" value="${esc(q)}" placeholder="Filtrar ${title.toLowerCase()}…"></form>`);
+  A.add(d.items.length ? `${pager}${entityTable(d.items, type === 'album' ? ['name', 'artist', 'year'] : ['name', 'year'])}${pager}`
+    : '<p class="empty">Nada coincide con el filtro.</p>');
+  A.render();
+}
+
+document.addEventListener('submit', (ev) => {
+  const f = ev.target.closest('.browse-filter');
+  if (!f) return;
+  ev.preventDefault();
+  const q = f.q.value.trim();
+  go(`#/todos/${f.dataset.cat}${q ? '?' + new URLSearchParams({ q }) : ''}`);
+});
+
+document.addEventListener('click', async (ev) => {
+  const b = ev.target.closest('[data-sample]');
+  if (!b) return;
+  const box = $(`[data-sample-box="${b.dataset.sample}"]`);
+  b.disabled = true;
+  try { box.innerHTML = await sampleBlock(b.dataset.sample); } finally { b.disabled = false; }
+});
 
 async function fillImages() {
   for (const slot of $$('[data-img-for]', main)) {
@@ -735,22 +928,72 @@ document.addEventListener('click', (ev) => {
 // ── Reproductor flotante ─────────────────────────────────────────────────────
 
 const player = $('#player');
-const frame = $('#player iframe');
+const plMsg = $('.pl-msg', player);
 let playingBtn = null;
+let yt = null;          // YT.Player, creado al primer ▶
+let ytReady = null;     // promesa de la API de YouTube (iframe_api)
+let current = null;     // { id, q, title, tries }
 
-function openPlayer(id, title, btn) {
+// La API de YouTube avisa cuando un vídeo no se puede reproducir (borrado, bloqueado en España, sin
+// inserción…: códigos 2, 5, 100, 101, 150, 153); entonces se busca otro con la misma consulta.
+function loadYT() {
+  ytReady ??= new Promise((resolve) => {
+    window.onYouTubeIframeAPIReady = resolve;
+    const s = document.createElement('script');
+    s.src = 'https://www.youtube.com/iframe_api';
+    document.head.append(s);
+  });
+  return ytReady;
+}
+
+async function openPlayer(id, title, btn) {
   if (playingBtn) playingBtn.classList.remove('playing');
   playingBtn = btn || null;
   if (playingBtn) playingBtn.classList.add('playing');
-  frame.src = `https://www.youtube-nocookie.com/embed/${id}?autoplay=1&rel=0`;
-  $('.pl-title', player).textContent = title || '';
-  $('.pl-yt', player).href = `https://www.youtube.com/watch?v=${id}`;
+  current = { id, q: btn?.dataset.q || '', title, tries: 0 };
   player.hidden = false;
   player.classList.remove('min');
+  showVideo(id, title);
+}
+
+async function showVideo(id, title) {
+  $('.pl-title', player).textContent = title || '';
+  $('.pl-yt', player).href = `https://www.youtube.com/watch?v=${id}`;
+  plMsg.hidden = true;
+  await loadYT();
+  if (yt) return yt.loadVideoById(id);
+  yt = new YT.Player('pl-frame', {
+    host: 'https://www.youtube-nocookie.com',
+    videoId: id,
+    playerVars: { autoplay: 1, rel: 0, origin: location.origin },
+    events: { onError: playerError },
+  });
+}
+
+async function playerError() {
+  const c = current;
+  if (!c) return;
+  const search = `https://www.youtube.com/results?search_query=${encodeURIComponent(c.q || c.title || '')}`;
+  const fail = () => {
+    plMsg.innerHTML = `YouTube no deja reproducir este vídeo. <a href="${esc(search)}" target="_blank" rel="noopener">Buscarlo en YouTube</a>`;
+    plMsg.hidden = false;
+  };
+  if (STATIC || !c.q || c.tries >= 3) return fail();
+  c.tries += 1;
+  plMsg.textContent = 'Vídeo no disponible; buscando otro…';
+  plMsg.hidden = false;
+  let r = {};
+  try { r = await getJson(`/api/yt?q=${encodeURIComponent(c.q)}&bad=${encodeURIComponent(c.id)}`); } catch { /* sin conexión */ }
+  if (current !== c) return;  // ya se pulsó otro
+  if (!r.id) return fail();
+  c.id = r.id;
+  if (playingBtn) playingBtn.dataset.yt = r.id;
+  showVideo(r.id, c.title);
 }
 
 function closePlayer() {
-  frame.src = 'about:blank';
+  if (yt) yt.stopVideo();
+  current = null;
   player.hidden = true;
   if (playingBtn) playingBtn.classList.remove('playing');
   playingBtn = null;
@@ -804,6 +1047,7 @@ async function route() {
     else if (p[0] === 'e') await showEntity(p[1]);
     else if (p[0] === 'year') await showYear(Number(p[1]));
     else if (p[0] === 'lista') await showList(p[1]);
+    else if (p[0] === 'todos') await showAll(p[1], query);
     else if (p[0] === 'buscar') {
       const qs = new URLSearchParams(query);
       $('#q').value = qs.get('q') || '';

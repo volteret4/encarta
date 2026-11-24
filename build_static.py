@@ -31,10 +31,10 @@ def dump(path, data):
 
 
 def export_entities(args):
-    out, ids = args
+    out, ids, swaps = args
     con = serve.connect()
     for i in ids:
-        dump(os.path.join(out, 'e', f'{i}.json'), serve.entity_detail(con, i))
+        dump(os.path.join(out, 'e', f'{i}.json'), serve.mark_ohw(serve.fix_yt(serve.entity_detail(con, i), swaps)))
     con.close()
     return len(ids)
 
@@ -44,6 +44,8 @@ def main():
     ap.add_argument('--min', type=int, default=10, help='relevancia mínima de las fichas exportadas')
     ap.add_argument('--out', default=os.path.join(HERE, 'site'))
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 4)
+    ap.add_argument('--cache', action='append', default=[],
+                    help='cache.db con los vídeos que no se reproducen (repetible; por defecto la local)')
     a = ap.parse_args()
     t0 = time.time()
 
@@ -59,8 +61,14 @@ def main():
     with open(html) as f:
         page = f.read()
     with open(html, 'w') as f:
+        # Umami solo en la versión pública.
+        page = page.replace('</head>', '<script defer src="https://cloud.umami.is/script.js" data-website-id="5d84fd6c-0760-4a0c-a2d0-ffabb82179f5"></script>\n</head>', 1)
         f.write(page.replace('<script src="app.js"></script>',
                              '<script>window.ENCARTA_STATIC = true;</script>\n<script src="app.js"></script>'))
+
+    # Vídeos que el reproductor encontró rotos (local y, si main.sh la trae, la de pepecono): su sustituto o nada.
+    swaps = serve.yt_swaps(*(a.cache or [serve.CACHE]))
+    print(f'vídeos sustituidos: {sum(1 for g in swaps.values() if g)}, quitados: {sum(1 for g in swaps.values() if not g)}')
 
     con = serve.connect()
     rows = con.execute('SELECT id, type, name, artist, year, weight FROM entity WHERE weight >= ? '
@@ -69,12 +77,14 @@ def main():
     print(f'índice: {len(rows)} fichas')
 
     lists = [r[0] for r in con.execute("SELECT id FROM list WHERE name NOT LIKE 'RYM Top%'")]
+    # Las «RYM Top» no se exportan: enlazan a su página en la web de must hear (rym_lastfm).
+    rym = {r[0]: r[1] for r in con.execute("SELECT id, slug FROM list WHERE name LIKE 'RYM Top%' AND slug IS NOT NULL")}
     for lid in lists:
-        dump(os.path.join(data, 'l', f'{lid}.json'), serve.list_detail(con, lid))
+        dump(os.path.join(data, 'l', f'{lid}.json'), serve.mark_ohw(serve.fix_yt(serve.list_detail(con, lid), swaps)))
     print(f'listas: {len(lists)}')
 
     for y in YEARS:
-        dump(os.path.join(data, 'y', f'{y}.json'), serve.year_detail(con, y))
+        dump(os.path.join(data, 'y', f'{y}.json'), serve.mark_ohw(serve.fix_yt(serve.year_detail(con, y), swaps)))
     print(f'años: {YEARS.start}-{YEARS.stop - 1}')
 
     # Las cifras de portada, de lo que lleva esta versión (no de la base completa).
@@ -86,12 +96,12 @@ def main():
     con.executemany('INSERT INTO exported VALUES (?)', [(r[0],) for r in rows])
     facts = con.execute("SELECT COUNT(*) FROM fact WHERE kind IN ('podcast', 'curiosity') "
                         "AND entity_id IN (SELECT id FROM exported)").fetchone()[0]
-    stats.update(counts, facts=facts, lists=len(lists), threshold=a.min, lists_exported=lists)
+    stats.update(counts, facts=facts, lists=len(lists), threshold=a.min, lists_exported=lists, rym_slugs=rym)
     dump(os.path.join(data, 'stats.json'), stats)
     con.close()
 
     ids = [r[0] for r in rows]
-    chunks = [(data, ids[i::a.jobs]) for i in range(a.jobs)]
+    chunks = [(data, ids[i::a.jobs], swaps) for i in range(a.jobs)]
     with Pool(a.jobs) as pool:
         done = sum(pool.map(export_entities, chunks))
     print(f'fichas: {done}')
